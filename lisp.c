@@ -55,12 +55,17 @@ typedef int bool;
 #define false 0
 #define true 1
 
+#define READER_STRING_LENGTH_MAX 1000
+
 // core internal
 
 typedef struct value
 {
     u32 tag;
-    int number;
+    union {
+        int number;
+        char* string;
+    } d;
 } value;
 
 
@@ -77,20 +82,33 @@ value* alloc_value()
 value* number_value(int n)
 {
     value* v = alloc_value();
-    v->number = n;
+    v->d.number = n;
+    return v;
+}
+
+value* string_value(char* s, int n)
+{
+    value* v = alloc_value();
+    v->d.string = strndup(s, n);
     return v;
 }
 
 int number(value* v)
 {
-    return v->number;
+    return v->d.number;
+}
+
+char* string(value* v)
+{
+    return v->d.string;
 }
 
 // reader
 
 bool is_digit(int c)
 {
-    if ((c - '0') < 10)
+    int d = c - '0';
+    if (d < 10 && d >= 0)
     {
         return true;
     }
@@ -118,7 +136,6 @@ void skip_whitespace(FILE* f)
 
 value* read(interpreter* l, FILE* in)
 {
-
     skip_whitespace(in);
     int c = fgetc(in);
     while (c != EOF)
@@ -133,6 +150,27 @@ value* read(interpreter* l, FILE* in)
             }
             ungetc(c, in);
             return number_value(n);
+        }
+        // read string
+        else if (c == '"') {
+            char buffer[READER_STRING_LENGTH_MAX];
+            char* p = buffer;
+            c = fgetc(in);
+            while (c != '"' && c != EOF) {
+                if (c == '\\') {
+                    c = fgetc(in);
+                    if (c == 'n') {
+                        c = '\n';
+                    }
+                    else if (c == 't') {
+                        c = '\t';
+                    }
+                }
+                *p++ = c;
+                c = fgetc(in);
+            }
+            *p++ = 0;
+            return string_value(buffer, p - buffer);
         }
 
         c = fgetc(in);
@@ -151,17 +189,28 @@ value* readstr(interpreter* l, const char* s)
 
 void print(value* v, FILE* out)
 {
-    fprintf(out, "%d\n", v->number);
+    fprintf(out, "%d\n", v->d.number);
 }
 
 void test_read_number(interpreter* i)
 {
     assert(12345 == number(readstr(i, "12345")));
+    assert(0 == number(readstr(i, "0")));
+    assert(0 == number(readstr(i, "0000")));
+}
+
+void test_read_string(interpreter* i)
+{
+    value* s = readstr(i, "\"foo\"");
+    assert(strcmp("foo", string(s)) == 0);
+    s = readstr(i, "\"fo\\\"ooo\\\"oobar\"");
+    assert(strcmp("fo\"ooo\"oobar", string(s)) == 0);
 }
 
 void tests(interpreter* i)
 {
     test_read_number(i);
+    test_read_string(i);
 }
 
 int main(int argc, char** argv)
