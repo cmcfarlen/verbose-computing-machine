@@ -59,12 +59,22 @@ typedef int bool;
 
 // core internal
 
+enum {
+    NUMBER_VALUE,
+    STRING_VALUE,
+    SYMBOL_VALUE
+};
+
 typedef struct value
 {
     u32 tag;
     union {
         int number;
         char* string;
+        struct symbol {
+            char* namespace;
+            char* name;
+        } symbol;
     } d;
 } value;
 
@@ -75,13 +85,14 @@ typedef struct interpreter
 
 value* alloc_value()
 {
-    value* v = (value*)malloc(sizeof(v));
+    value* v = (value*)malloc(sizeof(value));
     return v;
 }
 
 value* number_value(int n)
 {
     value* v = alloc_value();
+    v->tag = NUMBER_VALUE;
     v->d.number = n;
     return v;
 }
@@ -89,7 +100,24 @@ value* number_value(int n)
 value* string_value(char* s, int n)
 {
     value* v = alloc_value();
+    v->tag = STRING_VALUE;
     v->d.string = strndup(s, n);
+    return v;
+}
+
+value* symbol_value(char* namespace, char* name)
+{
+    value* v = alloc_value();
+    v->tag = SYMBOL_VALUE;
+    if (namespace)
+    {
+        v->d.symbol.namespace = strdup(namespace);
+    }
+    else
+    {
+        v->d.symbol.namespace = 0;
+    }
+    v->d.symbol.name = strdup(name);
     return v;
 }
 
@@ -172,11 +200,54 @@ value* read(interpreter* l, FILE* in)
             *p++ = 0;
             return string_value(buffer, p - buffer);
         }
+        // read symbol
+        else {
+            char buffer[READER_STRING_LENGTH_MAX];
+            char* p = buffer;
+            char* namespace = 0;
+            char* name = buffer;
+            while (!is_space(c) && c != EOF) {
+                if (c == '/') {
+                    namespace = buffer;
+                    *p++ = 0;
+                    name = p;
+                } else {
+                    *p++ = c;
+                }
+                c = fgetc(in);
+            }
+            *p++ = 0;
+            return symbol_value(namespace, name);
+        }
 
+        // just keep reading
         c = fgetc(in);
     }
 
     return 0;
+}
+
+void print(interpreter* i, value* v, FILE* out)
+{
+    if (v->tag == NUMBER_VALUE)
+    {
+        fprintf(out, "%d", v->d.number);
+    }
+    else if (v->tag == STRING_VALUE)
+    {
+        fprintf(out, "\"%s\"", v->d.string); 
+    }
+    else if (v->tag == SYMBOL_VALUE)
+    {
+        if (v->d.symbol.namespace) {
+            fprintf(out, "%s/%s", v->d.symbol.namespace, v->d.symbol.name);
+        }
+        else
+        {
+            fprintf(out, "%s", v->d.symbol.name);
+        }
+    }
+
 }
 
 value* readstr(interpreter* l, const char* s)
@@ -187,9 +258,9 @@ value* readstr(interpreter* l, const char* s)
     return v;
 }
 
-void print(value* v, FILE* out)
+void assert_round_trip(interpreter* i, const char* expr)
 {
-    fprintf(out, "%d\n", v->d.number);
+
 }
 
 void test_read_number(interpreter* i)
@@ -207,15 +278,44 @@ void test_read_string(interpreter* i)
     assert(strcmp("fo\"ooo\"oobar", string(s)) == 0);
 }
 
+void test_read_symbol(interpreter *i)
+{
+    value* s = readstr(i, "foo/bar");
+    assert(strcmp(s->d.symbol.namespace, "foo") == 0);
+    assert(strcmp(s->d.symbol.name, "bar") == 0);
+}
+
 void tests(interpreter* i)
 {
     test_read_number(i);
     test_read_string(i);
+    test_read_symbol(i);
+}
+
+void repl(interpreter* i, FILE* in, FILE* out)
+{
+    value* v = 0;
+    while (true) {
+        fprintf(out, "\n> ");
+        fflush(out);
+        v = read(i, in);
+        if (v) {
+           print(i, v, out);
+        }
+        else
+        {
+            fprintf(out, "Bye\n");
+            break;
+        }
+    }
 }
 
 int main(int argc, char** argv)
 {
+    size_t value_size = sizeof(value);
+
     tests(0);
+    repl(0, stdin, stdout);
 
     return 0;
 }
