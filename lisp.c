@@ -1,4 +1,5 @@
 
+#include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -50,6 +51,7 @@ FILE* string_open(const char* s)
 // definitions
 
 typedef unsigned long u32;
+typedef unsigned char u8;
 typedef int bool;
 
 #define false 0
@@ -64,12 +66,14 @@ enum {
     STRING_VALUE,
     SYMBOL_VALUE,
     KEYWORD_VALUE,
-    CONS_VALUE
+    CONS_VALUE,
+    BUILTIN_VALUE,
+    PROC_VALUE
 };
 
 typedef struct value
 {
-    u32 tag;
+    u8 tag;
     union {
         int number;
         char* string;
@@ -81,6 +85,14 @@ typedef struct value
             struct value* car;
             struct value* cdr;
         } cons;
+        struct builtin {
+            struct value* (*proc)(struct value* args);
+        } builtin;
+        struct proc {
+            struct value* arglist;
+            struct value* body;
+            struct value* env;
+        } proc;
     } d;
 } value;
 
@@ -145,6 +157,25 @@ value* keyword_value(char* namespace, char* name)
     return v;
 }
 
+value* builtin_value(value* (*f)(value* args))
+{
+    value* v = alloc_value();
+    v->tag = BUILTIN_VALUE;
+    v->d.builtin.proc = f;
+    return v;
+}
+
+value* proc_value(value* arglist, value* body, value* env)
+{
+    value* v = alloc_value();
+    v->tag = PROC_VALUE;
+    v->d.proc.arglist = arglist;
+    v->d.proc.body = body;
+    v->d.proc.env = env;
+
+    return v;
+}
+
 value* cons(value* a, value* b)
 {
     value* cell = alloc_value();
@@ -200,6 +231,14 @@ bool is_space(int c)
     return false;
 }
 
+bool is_delim(int c)
+{
+    return is_space(c) || c == ')';
+}
+
+void print(interpreter*, value*, FILE*);
+void println(interpreter*, value*, FILE*);
+value* pr(value*);
 value* read(interpreter*, FILE*);
 
 void skip_whitespace(FILE* f)
@@ -218,7 +257,7 @@ value* read_symbol(interpreter* i, int c,  FILE* in, value*(*create_value)(char*
     char* p = buffer;
     char* namespace = 0;
     char* name = buffer;
-    while (!is_space(c) && c != EOF) {
+    while (!is_delim(c) && c != EOF) {
         if (c == '/') {
             namespace = buffer;
             *p++ = 0;
@@ -229,6 +268,7 @@ value* read_symbol(interpreter* i, int c,  FILE* in, value*(*create_value)(char*
         c = fgetc(in);
     }
     *p++ = 0;
+    ungetc(c, in);
     return create_value(namespace, name);
 }
 
@@ -310,7 +350,7 @@ void print(interpreter* i, value* v, FILE* out)
     }
     else if (v->tag == STRING_VALUE)
     {
-        fprintf(out, "\"%s\"", v->d.string); 
+        fprintf(out, "\"%s\"", v->d.string);
     }
     else if (v->tag == SYMBOL_VALUE)
     {
@@ -347,6 +387,31 @@ void print(interpreter* i, value* v, FILE* out)
 
         fprintf(out, ")");
     }
+    else if (v->tag == BUILTIN_VALUE)
+    {
+        fprintf(out, "#<builtin>");
+    }
+    else if (v->tag == PROC_VALUE)
+    {
+        //fprintf(out, "#<procedure>");
+        fprintf(out, "(fn ");
+        print(i, v->d.proc.arglist, out);
+        fprintf(out, " ");
+        print(i, v->d.proc.body, out);
+        fprintf(out, ")");
+    }
+}
+
+void println(interpreter* i, value* v, FILE* out)
+{
+    print(i, v, out);
+    fprintf(out, "\n");
+}
+
+value* pr(value* v)
+{
+    println(0, v, stdout);
+    return v;
 }
 
 value* readstr(interpreter* l, const char* s)
@@ -355,6 +420,98 @@ value* readstr(interpreter* l, const char* s)
     value* v = read(l, f);
     fclose(f);
     return v;
+}
+
+value* lookup_symbol(value* env, value* sym)
+{
+    value* i = env;
+    while (i != nil) {
+        value* s = car(car(i));
+        // just check names for now
+        if (strcmp(s->d.symbol.name, sym->d.symbol.name) == 0)
+        {
+            return cdr(car(i));
+        }
+        i = cdr(i);
+    }
+
+    printf("no binding for: %s\n", sym->d.symbol.name);
+    return nil;
+}
+
+value* bind_symbol(value* env, value* sym, value* v)
+{
+    printf("Binding symbol: ");
+    print(0, sym, stdout);
+    printf(" to ");
+    print(0, v, stdout);
+    printf("\n");
+
+    return cons(cons(sym, v), env);
+}
+
+value* bind_fn(value* env, char* s, value*(*f)(value*))
+{
+    return bind_symbol(env, symbol_value(0, s), builtin_value(f));
+}
+
+value* eval(value*, value*);
+
+value* eval_args(value* args, value* env)
+{
+    if (args == nil)
+    {
+        return nil;
+    }
+    return cons(eval(car(args), env), eval_args(cdr(args), env));
+}
+
+value* apply(value* f, value* args)
+{
+    if (f->tag == BUILTIN_VALUE) {
+        return f->d.builtin.proc(args);
+    }
+
+    if (f->tag == PROC_VALUE) {
+        value* arglist = f->d.proc.arglist;
+        value* env = f->d.proc.env;
+        value* body = f->d.proc.body;
+
+        while (arglist != nil) {
+            if (args == nil) {
+                printf("Wrong number of args to fn");
+                return nil;
+            }
+            env = bind_symbol(env, car(arglist), car(args));
+            arglist = cdr(arglist);
+            args = cdr(args);
+        }
+
+        return eval(body, env);
+    }
+
+    return nil;
+}
+
+value* eval(value* e, value* env)
+{
+    u8 t = e->tag;
+    if (t == SYMBOL_VALUE)
+    {
+        return lookup_symbol(env, e);
+    }
+    if (t != CONS_VALUE)
+    {
+        return e;
+    }
+
+    value* f = car(e);
+    if ((f->tag == SYMBOL_VALUE) && strcmp("fn", f->d.symbol.name) == 0)
+    {
+        return proc_value(car(cdr(e)), car(cdr(cdr(e))), env);
+    }
+
+    return apply(eval(car(e), env), eval_args(cdr(e), env));
 }
 
 void assert_round_trip(interpreter* i, const char* expr)
@@ -406,6 +563,12 @@ void test_cons(interpreter* i)
 
 void tests(interpreter* i)
 {
+
+    print(i, eval(readstr(i, "((fn (x) x) 42)"), nil), stdout);
+
+    print(i, eval(readstr(i, "(fn (x) (inc x))"), nil), stdout);
+
+
     test_read_list(i);
     test_read_number(i);
     test_read_string(i);
@@ -413,14 +576,39 @@ void tests(interpreter* i)
     test_cons(i);
 }
 
+value* identity(value* args)
+{
+    printf("here at identity\n");
+    return car(args);
+}
+
+value* inc(value* args)
+{
+    printf("here at inc\n");
+    int n = number(car(args));
+    return number_value(n + 1);
+}
+
 void repl(interpreter* i, FILE* in, FILE* out)
 {
     value* v = 0;
+    value* env = nil;
+
+#define bind(f) env = bind_fn(env, #f, f)
+
+    bind(identity);
+    bind(inc);
+
     while (true) {
         fprintf(out, "\n> ");
         fflush(out);
         v = read(i, in);
-        // eval!
+        if (v) {
+           fprintf(out, "read: ");
+           print(i, v, out);
+           fprintf(out, "\n");
+        }
+        v = eval(v, env);
         if (v) {
            print(i, v, out);
         }
