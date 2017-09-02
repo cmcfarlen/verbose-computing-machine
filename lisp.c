@@ -62,7 +62,9 @@ typedef int bool;
 enum {
     NUMBER_VALUE,
     STRING_VALUE,
-    SYMBOL_VALUE
+    SYMBOL_VALUE,
+    KEYWORD_VALUE,
+    CONS_VALUE
 };
 
 typedef struct value
@@ -75,9 +77,15 @@ typedef struct value
             char* namespace;
             char* name;
         } symbol;
+        struct cons {
+            struct value* car;
+            struct value* cdr;
+        } cons;
     } d;
 } value;
 
+static value nil_value;
+value* nil = &nil_value;
 
 typedef struct interpreter
 {
@@ -121,6 +129,46 @@ value* symbol_value(char* namespace, char* name)
     return v;
 }
 
+value* keyword_value(char* namespace, char* name)
+{
+    value* v = alloc_value();
+    v->tag = KEYWORD_VALUE;
+    if (namespace)
+    {
+        v->d.symbol.namespace = strdup(namespace);
+    }
+    else
+    {
+        v->d.symbol.namespace = 0;
+    }
+    v->d.symbol.name = strdup(name);
+    return v;
+}
+
+value* cons(value* a, value* b)
+{
+    value* cell = alloc_value();
+    cell->tag = CONS_VALUE;
+    cell->d.cons.car = a;
+    cell->d.cons.cdr = b;
+    return cell;
+}
+
+value* car(value* v)
+{
+    return v->d.cons.car;
+}
+
+value* cdr(value* v)
+{
+    return v->d.cons.cdr;
+}
+
+value* cadr(value* v)
+{
+    return car(cdr(v));
+}
+
 int number(value* v)
 {
     return v->d.number;
@@ -152,6 +200,8 @@ bool is_space(int c)
     return false;
 }
 
+value* read(interpreter*, FILE*);
+
 void skip_whitespace(FILE* f)
 {
     int c = fgetc(f);
@@ -160,6 +210,38 @@ void skip_whitespace(FILE* f)
         c = fgetc(f);
     }
     ungetc(c, f);
+}
+
+value* read_symbol(interpreter* i, int c,  FILE* in, value*(*create_value)(char*, char*))
+{
+    char buffer[READER_STRING_LENGTH_MAX];
+    char* p = buffer;
+    char* namespace = 0;
+    char* name = buffer;
+    while (!is_space(c) && c != EOF) {
+        if (c == '/') {
+            namespace = buffer;
+            *p++ = 0;
+            name = p;
+        } else {
+            *p++ = c;
+        }
+        c = fgetc(in);
+    }
+    *p++ = 0;
+    return create_value(namespace, name);
+}
+
+value* read_list(interpreter* l, FILE* in)
+{
+    skip_whitespace(in);
+    int c = fgetc(in);
+    if (c == ')') {
+        return nil;
+    }
+    ungetc(c, in);
+    value* v = read(l, in);
+    return cons(v, read_list(l, in));
 }
 
 value* read(interpreter* l, FILE* in)
@@ -200,24 +282,17 @@ value* read(interpreter* l, FILE* in)
             *p++ = 0;
             return string_value(buffer, p - buffer);
         }
+        // read list
+        else if (c == '(') {
+            return read_list(l, in);
+        }
+        // read keyword
+        else if (c == ':') {
+            return read_symbol(l, fgetc(in), in, keyword_value);
+        }
         // read symbol
         else {
-            char buffer[READER_STRING_LENGTH_MAX];
-            char* p = buffer;
-            char* namespace = 0;
-            char* name = buffer;
-            while (!is_space(c) && c != EOF) {
-                if (c == '/') {
-                    namespace = buffer;
-                    *p++ = 0;
-                    name = p;
-                } else {
-                    *p++ = c;
-                }
-                c = fgetc(in);
-            }
-            *p++ = 0;
-            return symbol_value(namespace, name);
+            return read_symbol(l, c, in, symbol_value);
         }
 
         // just keep reading
@@ -247,7 +322,31 @@ void print(interpreter* i, value* v, FILE* out)
             fprintf(out, "%s", v->d.symbol.name);
         }
     }
+    else if (v->tag == KEYWORD_VALUE)
+    {
+        if (v->d.symbol.namespace) {
+            fprintf(out, ":%s/%s", v->d.symbol.namespace, v->d.symbol.name);
+        }
+        else
+        {
+            fprintf(out, ":%s", v->d.symbol.name);
+        }
+    }
+    else if (v->tag == CONS_VALUE)
+    {
+        fprintf(out, "(");
 
+        for (value* p = v; p != nil; p = cdr(p))
+        {
+            if (p != v)
+            {
+               fprintf(out, " ");
+            }
+            print(i, car(p), out);
+        }
+
+        fprintf(out, ")");
+    }
 }
 
 value* readstr(interpreter* l, const char* s)
@@ -285,11 +384,33 @@ void test_read_symbol(interpreter *i)
     assert(strcmp(s->d.symbol.name, "bar") == 0);
 }
 
+void test_read_list(interpreter* i)
+{
+    value* l = readstr(i, "(1 2 3 4 5)");
+
+    assert(1 == number(car(l)));
+}
+
+void test_cons(interpreter* i)
+{
+    value* v = number_value(42);
+    value* v2 = string_value("fooo", 5);
+    value* l = cons(v2, cons(v, nil));
+
+    assert(42 == number(v));
+    assert(v2 == car(l));
+    assert(nil == cdr(cdr(l)));
+
+    print(i, l, stdout);
+}
+
 void tests(interpreter* i)
 {
+    test_read_list(i);
     test_read_number(i);
     test_read_string(i);
     test_read_symbol(i);
+    test_cons(i);
 }
 
 void repl(interpreter* i, FILE* in, FILE* out)
@@ -299,6 +420,7 @@ void repl(interpreter* i, FILE* in, FILE* out)
         fprintf(out, "\n> ");
         fflush(out);
         v = read(i, in);
+        // eval!
         if (v) {
            print(i, v, out);
         }
