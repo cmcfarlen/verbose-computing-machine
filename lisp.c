@@ -104,7 +104,10 @@ enum {
    PROC_VALUE
 };
 
-typedef struct value
+typedef struct value value;
+typedef value* (*builtin_fn)();
+
+struct value
 {
    u8 tag;
    union {
@@ -115,19 +118,19 @@ typedef struct value
          char* name;
       } symbol;
       struct cons {
-         struct value* car;
-         struct value* cdr;
+         value* car;
+         value* cdr;
       } cons;
       struct builtin {
-         struct value* (*proc)(struct value* args);
+         builtin_fn proc;
       } builtin;
       struct proc {
-         struct value* arglist;
-         struct value* body;
-         struct value* env;
+         value* arglist;
+         value* body;
+         value* env;
       } proc;
    } d;
-} value;
+};
 
 static value nil_value;
 value* nil = &nil_value;
@@ -190,7 +193,7 @@ value* keyword_value(char* namespace, char* name)
    return v;
 }
 
-value* builtin_value(value* (*f)(value* args))
+value* builtin_value(builtin_fn f)
 {
    value* v = alloc_value();
    v->tag = BUILTIN_VALUE;
@@ -500,7 +503,7 @@ value* bind_symbol(value* env, value* sym, value* v)
    return cons(cons(sym, v), env);
 }
 
-value* bind_fn(value* env, char* s, value*(*f)(value*))
+value* bind_fn(value* env, char* s, builtin_fn f)
 {
    return bind_symbol(env, symbol_value(0, s), builtin_value(f));
 }
@@ -518,7 +521,26 @@ value* eval_args(value* args, value* env)
 value* apply(value* f, value* args)
 {
    if (f->tag == BUILTIN_VALUE) {
-      return f->d.builtin.proc(args);
+      builtin_fn fn = f->d.builtin.proc;
+      value* argv[10];
+      int cnt = 0;
+
+      for (value* a = args; a != nil; a = cdr(a)) {
+         argv[cnt++] = car(a);
+      }
+
+      switch (cnt) {
+      case 0: return fn();
+      case 1: return fn(argv[0]);
+      case 2: return fn(argv[0], argv[1]);
+      case 3: return fn(argv[0], argv[1], argv[2], argv[3]);
+      case 4: return fn(argv[0], argv[1], argv[2], argv[3], argv[4]);
+      case 5: return fn(argv[0], argv[1], argv[2], argv[3], argv[4], argv[5]);
+      case 6: return fn(argv[0], argv[1], argv[2], argv[3], argv[4], argv[5], argv[6]);
+      case 7: return fn(argv[0], argv[1], argv[2], argv[3], argv[4], argv[5], argv[6], argv[7]);
+      case 8: return fn(argv[0], argv[1], argv[2], argv[3], argv[4], argv[5], argv[6], argv[7], argv[8]);
+      case 9: return fn(argv[0], argv[1], argv[2], argv[3], argv[4], argv[5], argv[6], argv[7], argv[8], argv[9]);
+      }
    }
 
    if (f->tag == PROC_VALUE) {
@@ -641,17 +663,22 @@ void tests(interpreter* i)
    test_cons(i);
 }
 
-value* identity(value* args)
+value* identity(value* x)
 {
-   printf("here at identity\n");
-   return car(args);
+   return x;
 }
 
-value* inc(value* args)
+value* inc(value* v)
 {
-   printf("here at inc\n");
-   int n = number(car(args));
+   int n = number(v);
    return number_value(n + 1);
+}
+
+value* plus(value* a, value* b)
+{
+   int va = number(a);
+   int vb = number(b);
+   return number_value(va + vb);
 }
 
 void repl(interpreter* i, FILE* in, FILE* out)
@@ -659,14 +686,16 @@ void repl(interpreter* i, FILE* in, FILE* out)
    value* v = 0;
    value* env = nil;
 
-#define bind(f) env = bind_fn(env, #f, f)
+#define bind(f) env = bind_fn(env, #f, (builtin_fn) f)
 
    bind(identity);
    bind(inc);
+   bind(plus);
+
+#undef bind
 
    while (true) {
-      fprintf(out, "\n> ");
-      fflush(out);
+      fprintf(out, "\n> "); fflush(out);
       v = read(i, in);
       if (v) {
          fprintf(out, "read: ");
