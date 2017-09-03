@@ -111,7 +111,7 @@ typedef value* (*builtin_fn)();
 struct value
 {
    u8 tag;
-   u8 mark;
+   u32 mark;
    value* next; // temp for playing with GC
    union {
       int number;
@@ -141,10 +141,12 @@ value* nil = &nil_value;
 
 struct environment
 {
-   value* object_root; // root object to keep track of allocated values
+   value object_root; // root object to keep track of allocated values
+   int alloc_count;
    int object_count;
-   int generation;
+   u32 generation;
    value* symbols;
+   value* free_list;
 };
 
 value* car(value* v)
@@ -174,15 +176,64 @@ char* string(value* v)
 
 void gc(environment* env)
 {
+   int g = ++env->generation;
+   int mark_cnt = 0;
+   int garbage_cnt = 0;
+
+   if (env->symbols == 0) {
+      env->symbols = nil;
+   }
+
+   for (value* s = env->symbols; s != nil; s = cdr(s)) {
+      s->mark = g;
+      ++mark_cnt;
+      value* o = car(s);
+      o->mark = g;
+      ++mark_cnt;
+   }
+
+   value* o = env->object_root.next;
+   value* p = &env->object_root;
+   while (o) {
+      value* c = o;
+      o = o->next;
+
+      if (c->mark != g) {
+         if (p) {
+            p->next = c->next;
+         }
+         c->next = env->free_list;
+         env->free_list = c;
+         ++garbage_cnt;
+         --env->object_count;
+      } else {
+         p = c;
+      }
+   }
+
+   printf("\ngc object cnt: %i\n", env->object_count);
+   printf("gc alloc cnt: %i\n", env->alloc_count);
+   printf("gc mark cnt: %i\n", mark_cnt);
+   printf("gc garbage cnt: %i\n", garbage_cnt);
 }
 
 value* alloc_value(environment* env)
 {
-   value* v = (value*)malloc(sizeof(value));
-   v->next = env->object_root;
+   value* v = 0;
+
+   if (env->free_list) {
+      v = env->free_list;
+      env->free_list = v->next;
+   } else {
+      v = (value*)malloc(sizeof(value));
+      env->alloc_count++;
+   }
+
+   v->next = env->object_root.next;
    v->mark = -1;
-   env->object_root = v;
+   env->object_root.next = v;
    env->object_count++;
+
    return v;
 }
 
@@ -677,8 +728,24 @@ void test_string_write(environment* e)
 
 }
 
+void test_gc()
+{
+   environment env = {0};
+
+   value* sym = symbol_value(&env, 0, "test");
+
+   gc(&env);
+
+   alloc_value(&env);
+   alloc_value(&env);
+   alloc_value(&env);
+
+   gc(&env);
+}
+
 void tests(environment* i)
 {
+   test_gc();
    test_string_write(i);
 
    print(i, eval(i, readstr(i, "((fn (x) x) 42)"), nil), stdout);
@@ -714,11 +781,10 @@ value* plus(environment* e, value* a, value* b)
 
 value* stats(environment* env)
 {
-   printf("Allocation cnt: %i\n", env->object_count);
+   printf("Allocation cnt: %i\n", env->alloc_count);
+   printf("Object cnt: %i\n", env->object_count);
    printf("Symbol table:\n");
-   for (value* l = env->symbols; l != nil; l = cdr(l)) {
-      println(env, car(l), stdout);
-   }
+   println(env, env->symbols, stdout);
 
    return nil;
 }
@@ -754,6 +820,8 @@ void repl(environment* i, FILE* in, FILE* out)
         fprintf(out, "Bye\n");
          break;
       }
+      gc(i);
+      stats(i);
    }
 }
 
