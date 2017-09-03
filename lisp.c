@@ -95,6 +95,7 @@ typedef int bool;
 // core internal
 
 enum {
+   GARBAGE_VALUE,
    NUMBER_VALUE,
    STRING_VALUE,
    SYMBOL_VALUE,
@@ -174,7 +175,37 @@ char* string(value* v)
    return v->d.string;
 }
 
-void gc(environment* env)
+int mark(value* v, u32 gen)
+{
+   if (v == nil) {
+      return 0;
+   }
+
+   if (v->mark == gen) {
+       return 0;
+   }
+
+   u8 t = v->tag;
+   if (t == GARBAGE_VALUE)
+   {
+       fprintf(stdout, "Fatal error! Trying to mark garbage!\n");
+       return 0;
+   }
+   v->mark = gen;
+   if (t == CONS_VALUE)
+   {
+       return 1 + mark(car(v), gen) + mark(cdr(v), gen);
+   }
+
+   if (t == PROC_VALUE)
+   {
+       return 1 + mark(v->d.proc.arglist, gen) + mark(v->d.proc.body, gen) + mark(v->d.proc.env, gen);
+   }
+
+   return 1;
+}
+
+void gc(environment* env, value* roots)
 {
    int g = ++env->generation;
    int mark_cnt = 0;
@@ -184,13 +215,8 @@ void gc(environment* env)
       env->symbols = nil;
    }
 
-   for (value* s = env->symbols; s != nil; s = cdr(s)) {
-      s->mark = g;
-      ++mark_cnt;
-      value* o = car(s);
-      o->mark = g;
-      ++mark_cnt;
-   }
+   mark_cnt += mark(env->symbols, g);
+   mark_cnt += mark(roots, g);
 
    value* o = env->object_root.next;
    value* p = &env->object_root;
@@ -202,6 +228,12 @@ void gc(environment* env)
          if (p) {
             p->next = c->next;
          }
+
+         if (c->tag == STRING_VALUE && c->d.string) {
+            free(c->d.string);
+         }
+         c->tag = GARBAGE_VALUE;
+
          c->next = env->free_list;
          env->free_list = c;
          ++garbage_cnt;
@@ -249,6 +281,7 @@ value* string_value(environment* env, char* s, int n)
 {
    value* v = alloc_value(env);
    v->tag = STRING_VALUE;
+   // TODO: alloc strings in env
    v->d.string = strndup(s, n);
    return v;
 }
@@ -461,7 +494,13 @@ value* read(environment* env, FILE* in)
 
 void print(environment* i, value* v, FILE* out)
 {
-   if (v->tag == NUMBER_VALUE) {
+   if (v == nil) {
+      fprintf(out, "nil");
+   }
+   else if (v->tag == GARBAGE_VALUE) {
+       fprintf(out, "Internal error, trying to print garbage!?!\n");
+   }
+   else if (v->tag == NUMBER_VALUE) {
       fprintf(out, "%d", v->d.number);
    }
    else if (v->tag == STRING_VALUE) {
@@ -502,13 +541,19 @@ void print(environment* i, value* v, FILE* out)
    else if (v->tag == CONS_VALUE) {
       fprintf(out, "(");
 
-      for (value* p = v; p != nil; p = cdr(p))
-      {
-         if (p != v)
+      if (cdr(v) == nil || cdr(v)->tag == CONS_VALUE) {
+         for (value* p = v; p != nil; p = cdr(p))
          {
-            fprintf(out, " ");
+            if (p != v)
+            {
+               fprintf(out, " ");
+            }
+            print(i, car(p), out);
          }
-         print(i, car(p), out);
+      } else {
+         print(i, car(v), out);
+         fprintf(out, " . ");
+         print(i, cdr(v), out);
       }
 
       fprintf(out, ")");
@@ -561,7 +606,7 @@ value* lookup_symbol(value* env, value* sym)
    value* i = env;
    while (i != nil) {
       value* s = car(car(i));
-      // just check names for now
+      // TODO: just check names for now
       if (strcmp(s->d.symbol.name, sym->d.symbol.name) == 0)
       {
          return cdr(car(i));
@@ -569,12 +614,19 @@ value* lookup_symbol(value* env, value* sym)
       i = cdr(i);
    }
 
-   printf("no binding for: %s\n", sym->d.symbol.name);
    return nil;
 }
 
 value* bind_symbol(environment* e, value* env, value* sym, value* v)
 {
+   value* existing = lookup_symbol(env, sym);
+   if (existing != nil) {
+      printf("replacing binding for symbol: ");
+      print(e, sym, stdout);
+      printf(" -> ");
+      println(e, existing, stdout);
+   }
+
    printf("Binding symbol: ");
    print(e, sym, stdout);
    printf(" to ");
@@ -587,6 +639,11 @@ value* bind_symbol(environment* e, value* env, value* sym, value* v)
 value* bind_fn(environment* e, value* env, char* s, builtin_fn f)
 {
    return bind_symbol(e, env, symbol_value(e, 0, s), builtin_value(e, f));
+}
+
+value* bind_var(environment* e, value* sym, value* v)
+{
+   return nil;
 }
 
 value* eval(environment* e, value*, value*);
@@ -645,19 +702,31 @@ value* apply(environment* e, value* f, value* args)
    return nil;
 }
 
+int is_special_form(value* f, const char* s)
+{
+   return (f->tag == SYMBOL_VALUE) && strcmp(s, f->d.symbol.name) == 0;
+}
+
 value* eval(environment* e, value* expr, value* env)
 {
    u8 t = expr->tag;
    if (t == SYMBOL_VALUE) {
-      return lookup_symbol(env, expr);
+      value* s = lookup_symbol(env, expr);
+      if (s == nil) {
+         printf("no binding for: %s\n", expr->d.symbol.name);
+      }
+      return s;
    }
    else if (t != CONS_VALUE) {
       return expr;
    }
 
    value* f = car(expr);
-   if ((f->tag == SYMBOL_VALUE) && strcmp("fn", f->d.symbol.name) == 0) {
+   if (is_special_form(f, "fn")) {
       return proc_value(e, car(cdr(expr)), car(cdr(cdr(expr))), env);
+   }
+   if (is_special_form(f, "def")) {
+      return bind_var(e, car(cdr(expr)), eval(e, cdr(cdr(expr)), env));
    }
 
    return apply(e, eval(e, car(expr), env), eval_args(e, cdr(expr), env));
@@ -734,13 +803,13 @@ void test_gc()
 
    value* sym = symbol_value(&env, 0, "test");
 
-   gc(&env);
+   gc(&env, nil);
 
    alloc_value(&env);
    alloc_value(&env);
    alloc_value(&env);
 
-   gc(&env);
+   gc(&env, nil);
 }
 
 void tests(environment* i)
@@ -813,14 +882,15 @@ void repl(environment* i, FILE* in, FILE* out)
       }
       v = eval(i, v, env);
       if (v) {
-         print(i, v, out);
+         println(i, v, out);
       }
       else
       {
-        fprintf(out, "Bye\n");
+         fprintf(out, "Bye\n");
          break;
       }
-      gc(i);
+      println(i, env, stdout);
+      gc(i, env);
       stats(i);
    }
 }
