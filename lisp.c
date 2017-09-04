@@ -191,12 +191,18 @@ struct environment
 
 value* car(value* v)
 {
-   return v->d.cons.car;
+   if (v != nil) {
+      return v->d.cons.car;
+   }
+   return nil;
 }
 
 value* cdr(value* v)
 {
-   return v->d.cons.cdr;
+   if (v != nil) {
+      return v->d.cons.cdr;
+   }
+   return nil;
 }
 
 value* set_car(value* v, value* n)
@@ -1018,6 +1024,20 @@ value* eval(environment* e, value* expr, value* env)
          printf("var requires one argument");
       }
       return nil;
+   }
+   if (is_special_form(f, "if")) {
+      // (if predicate consequent alternative)
+      value* predicate = car(cdr(expr));
+      value* consequent = car(cdr(cdr(expr)));
+      value* alternative = car(cdr(cdr(cdr(expr))));
+
+      value* p = eval(e, predicate, env);
+      if (p != nil) {
+         return eval(e, consequent, env);
+      } else {
+         return eval(e, alternative, env);
+      }
+
    }
 
    return apply(e, eval(e, car(expr), env), eval_args(e, cdr(expr), env));
