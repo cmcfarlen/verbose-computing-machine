@@ -104,7 +104,8 @@ enum {
    BUILTIN_VALUE,
    PROC_VALUE,
    MAP_VALUE,
-   ENTRY_VALUE
+   ENTRY_VALUE,
+   VAR_VALUE
 };
 
 typedef struct value value;
@@ -143,6 +144,11 @@ struct value
       struct map {
          value* entries;
       } map;
+      struct var {
+         value* sym; // Symbol the var is bound to
+         value* val;
+         value* meta; // TODO: support meta
+      } var;
    } d;
 };
 
@@ -308,6 +314,11 @@ int mark(value* v, u32 gen)
       return 1 + mark(v->d.entry.key, gen) + mark(v->d.entry.val, gen) + mark(v->d.entry.next, gen);
    }
 
+   if (t == VAR_VALUE)
+   {
+      return 1 + mark(v->d.var.val, gen) + mark(v->d.var.meta, gen);
+   }
+
    return 1;
 }
 
@@ -393,6 +404,16 @@ value* string_value(environment* env, char* s, int n)
    v->tag = STRING_VALUE;
    // TODO: alloc strings in env
    v->d.string = strndup(s, n);
+   return v;
+}
+
+value* var_value(environment* env, value* sym, value* val, value* meta)
+{
+   value* v = alloc_value(env);
+   v->tag = VAR_VALUE;
+   v->d.var.sym = sym;
+   v->d.var.val = val;
+   v->d.var.meta = meta;
    return v;
 }
 
@@ -755,12 +776,21 @@ void print(environment* i, value* v, FILE* out)
       fprintf(out, "#<builtin>");
    }
    else if (v->tag == PROC_VALUE) {
-      //fprintf(out, "#<procedure>");
+      fprintf(out, "#<procedure:");
+      print(i, v->d.proc.env, out);
+      fprintf(out, ">");
+
+#if 0
       fprintf(out, "(fn ");
       print(i, v->d.proc.arglist, out);
       fprintf(out, " ");
       print(i, v->d.proc.body, out);
       fprintf(out, ")");
+#endif
+
+   } else if (v->tag == VAR_VALUE) {
+      fprintf(out, "#'");
+      print(i, v->d.var.sym, out);
    }
 }
 
@@ -828,6 +858,9 @@ value* lookup_symbol(environment* e, value* env, value* sym)
    if (binding != nil) {
       v = cdr(binding);
       // TODO(check for and resolv var bindngs)
+      if (v->tag == VAR_VALUE) {
+         v = v->d.var.val;
+      }
    }
 
    return v;
@@ -872,9 +905,9 @@ value* bind_fn(environment* e, char* s, builtin_fn f)
 
 value* bind_var(environment* e, value* sym, value* v)
 {
-   // look for existing binding
+   value* var = var_value(e, sym, v, nil);
 
-   return nil;
+   return bind_symbol(e, sym, var);
 }
 
 /*
@@ -965,7 +998,7 @@ value* eval(environment* e, value* expr, value* env)
       return proc_value(e, car(cdr(expr)), car(cdr(cdr(expr))), env);
    }
    if (is_special_form(f, "def")) {
-      return bind_var(e, car(cdr(expr)), eval(e, cdr(cdr(expr)), env));
+      return bind_var(e, car(cdr(expr)), eval(e, car(cdr(cdr(expr))), env));
    }
    if (is_special_form(f, "quote")) {
       return car(cdr(expr));
@@ -1106,6 +1139,9 @@ value* stats(environment* env)
    printf("Object cnt: %i\n", env->object_count);
    printf("Symbol table:\n");
    println(env, env->symbols, stdout);
+
+   printf("global binding table:\n");
+   println(env, env->defs, stdout);
 
    return nil;
 }
