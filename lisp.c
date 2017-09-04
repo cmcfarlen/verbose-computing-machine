@@ -1037,7 +1037,40 @@ value* eval(environment* e, value* expr, value* env)
       } else {
          return eval(e, alternative, env);
       }
+   }
+   if (is_special_form(f, "let")) {
+      // (let ((x 1) (y (inc x))) body)
+      value* bindings = car(cdr(expr));
+      pr(e, bindings);
+      value* body = cdr(cdr(expr));
+      pr(e, body);
 
+      for (value* b = bindings; b != nil; b = cdr(b)) {
+         value* p = car(b);
+         value* s = car(p);
+         value* ex = car(cdr(p));
+         if (s->tag != SYMBOL_VALUE) {
+            printf("left of binding form must be a symbol!");
+            pr(e, s);
+            return nil;
+         }
+
+         if (ex == nil) {
+            printf("Uneven binding forms in let!");
+            return nil;
+         }
+
+         env = extend_env(e, env, s, eval(e, ex, env));
+      }
+
+      // evaluate each for in body, returning the last result
+      value* v = nil;
+      for (value* b = body; b != nil; b = cdr(b)) {
+         value* bexpr = car(b);
+         v = eval(e, bexpr, env);
+      }
+
+      return v;
    }
 
    return apply(e, eval(e, car(expr), env), eval_args(e, cdr(expr), env));
@@ -1191,6 +1224,16 @@ value* var_get(environment* env, value* var)
    return nil;
 }
 
+value* builtin_car(environment* env, value* v)
+{
+   return car(v);
+}
+
+value* builtin_cdr(environment* env, value* v)
+{
+   return cdr(v);
+}
+
 void repl(environment* i, FILE* in, FILE* out)
 {
    value* v = 0;
@@ -1201,11 +1244,14 @@ void repl(environment* i, FILE* in, FILE* out)
    bind(inc);
    bind(plus);
    bind(stats);
+   bind(cons);
 
 #undef bind
 
    bind_fn(i, "=", equals);
    bind_fn(i, "var-get", var_get);
+   bind_fn(i, "car", builtin_car);
+   bind_fn(i, "cdr", builtin_cdr);
 
    while (true) {
       fprintf(out, "\n> "); fflush(out);
