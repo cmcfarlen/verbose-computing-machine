@@ -1003,6 +1003,22 @@ value* eval(environment* e, value* expr, value* env)
    if (is_special_form(f, "quote")) {
       return car(cdr(expr));
    }
+   if (is_special_form(f, "var")) {
+      value* sym = car(cdr(expr));
+      if (sym != nil) {
+         value* b = find_binding(e->defs, sym);
+         if (b != nil && b->tag == VAR_VALUE) {
+            return cdr(b);
+         } else {
+            printf("failed to find binding for: ");
+            pr(e, sym);
+            printf("\n");
+         }
+      } else {
+         printf("var requires one argument");
+      }
+      return nil;
+   }
 
    return apply(e, eval(e, car(expr), env), eval_args(e, cdr(expr), env));
 }
@@ -1146,6 +1162,15 @@ value* stats(environment* env)
    return nil;
 }
 
+value* var_get(environment* env, value* var)
+{
+   if (var->tag == VAR_VALUE) {
+      return var->d.var.val;
+   }
+   printf("var-get called with non-var value");
+   return nil;
+}
+
 void repl(environment* i, FILE* in, FILE* out)
 {
    value* v = 0;
@@ -1160,6 +1185,7 @@ void repl(environment* i, FILE* in, FILE* out)
 #undef bind
 
    bind_fn(i, "=", equals);
+   bind_fn(i, "var-get", var_get);
 
    while (true) {
       fprintf(out, "\n> "); fflush(out);
