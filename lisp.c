@@ -130,6 +130,7 @@ struct value
       struct entry {
          value* key;
          value* val;
+         value* next;
       } entry;
       struct builtin {
          builtin_fn proc;
@@ -288,7 +289,7 @@ int mark(value* v, u32 gen)
 
    if (t == ENTRY_VALUE)
    {
-      return 1 + mark(v->d.entry.key, gen) + mark(v->d.entry.val, gen);
+      return 1 + mark(v->d.entry.key, gen) + mark(v->d.entry.val, gen) + mark(v->d.entry.next, gen);
    }
 
    return 1;
@@ -455,7 +456,7 @@ value* entry_value(environment* e, value* key, value* val)
    v->tag = ENTRY_VALUE;
    v->d.entry.key = key;
    v->d.entry.val = val;
-   v->next = nil;
+   v->d.entry.next = nil;
 
    return v;
 }
@@ -625,8 +626,8 @@ value* read(environment* env, FILE* in)
          value* e = read_entry(env, in);
          value* entries = e;
          while (e != nil) {
-            e->next = read_entry(env, in);
-            e = e->next;
+            e->d.entry.next = read_entry(env, in);
+            e = e->d.entry.next;
          }
          return map_value(env, entries);
       }
@@ -699,7 +700,7 @@ void print(environment* i, value* v, FILE* out)
       fprintf(out, "{");
 
       value* e = v->d.map.entries;
-      for (value* p = e; p != nil; p = p->next) {
+      for (value* p = e; p != nil; p = p->d.entry.next) {
          if (p != e) {
             fprintf(out, ", ");
          }
@@ -900,6 +901,9 @@ value* eval(environment* e, value* expr, value* env)
    if (is_special_form(f, "def")) {
       return bind_var(e, car(cdr(expr)), eval(e, cdr(cdr(expr)), env));
    }
+   if (is_special_form(f, "quote")) {
+      return car(cdr(expr));
+   }
 
    return apply(e, eval(e, car(expr), env), eval_args(e, cdr(expr), env));
 }
@@ -942,6 +946,7 @@ void test_read_map(environment* i)
 {
    value* m = readstr(i, "{1 2 3 4 5 6}");
 
+   gc(i, nil);
 
 }
 
@@ -1072,6 +1077,7 @@ void repl(environment* i, FILE* in, FILE* out)
          fprintf(out, "Bye\n");
          break;
       }
+      println(i, env, out);
       gc(i, env);
       stats(i);
    }
