@@ -102,7 +102,9 @@ enum {
    KEYWORD_VALUE,
    CONS_VALUE,
    BUILTIN_VALUE,
-   PROC_VALUE
+   PROC_VALUE,
+   MAP_VALUE,
+   ENTRY_VALUE
 };
 
 typedef struct value value;
@@ -125,6 +127,10 @@ struct value
          value* car;
          value* cdr;
       } cons;
+      struct entry {
+         value* key;
+         value* val;
+      } entry;
       struct builtin {
          builtin_fn proc;
       } builtin;
@@ -133,6 +139,9 @@ struct value
          value* body;
          value* env;
       } proc;
+      struct map {
+         value* entries;
+      } map;
    } d;
 };
 
@@ -200,6 +209,16 @@ int mark(value* v, u32 gen)
    if (t == PROC_VALUE)
    {
        return 1 + mark(v->d.proc.arglist, gen) + mark(v->d.proc.body, gen) + mark(v->d.proc.env, gen);
+   }
+
+   if (t == MAP_VALUE)
+   {
+      return 1 + mark(v->d.map.entries, gen);
+   }
+
+   if (t == ENTRY_VALUE)
+   {
+      return 1 + mark(v->d.entry.key, gen) + mark(v->d.entry.val, gen);
    }
 
    return 1;
@@ -360,6 +379,26 @@ value* proc_value(environment* e, value* arglist, value* body, value* env)
    return v;
 }
 
+value* entry_value(environment* e, value* key, value* val)
+{
+   value* v = alloc_value(e);
+   v->tag = ENTRY_VALUE;
+   v->d.entry.key = key;
+   v->d.entry.val = val;
+   v->next = nil;
+
+   return v;
+}
+
+value* map_value(environment* e, value* entries)
+{
+   value* v = alloc_value(e);
+   v->tag = MAP_VALUE;
+   v->d.map.entries = entries;
+
+   return v;
+}
+
 // reader
 
 bool is_digit(int c)
@@ -419,6 +458,11 @@ value* read_symbol(environment* i, int c,  FILE* in, value*(*create_value)(envir
    }
    *p++ = 0;
    ungetc(c, in);
+
+   if (namespace == 0 && strcmp(name, "nil") == 0) {
+      return nil;
+   }
+
    return create_value(i, namespace, name);
 }
 
@@ -430,8 +474,34 @@ value* read_list(environment* env, FILE* in)
       return nil;
    }
    ungetc(c, in);
+
    value* v = read(env, in);
    return cons(env, v, read_list(env, in));
+}
+
+value* read_entry(environment* env, FILE* in)
+{
+   skip_whitespace(in);
+   int c = fgetc(in);
+   if (c == '}') {
+      return nil;
+   }
+   ungetc(c, in);
+
+   value* k = read(env, in);
+
+   skip_whitespace(in);
+
+   c = fgetc(in);
+   if (c == '}') {
+      fprintf(stdout, "Map literal must have an even number of forms.");
+      return nil;
+   }
+   ungetc(c, in);
+
+   value* v = read(env, in);
+
+   return entry_value(env, k, v);
 }
 
 value* read(environment* env, FILE* in)
@@ -475,6 +545,15 @@ value* read(environment* env, FILE* in)
       // read list
       else if (c == '(') {
          return read_list(env, in);
+      }
+      else if (c == '{') {
+         value* e = read_entry(env, in);
+         value* entries = e;
+         while (e != nil) {
+            e->next = read_entry(env, in);
+            e = e->next;
+         }
+         return map_value(env, entries);
       }
       // read keyword
       else if (c == ':') {
@@ -537,6 +616,21 @@ void print(environment* i, value* v, FILE* out)
       {
          fprintf(out, ":%s", v->d.symbol.name);
       }
+   }
+   else if (v->tag == MAP_VALUE) {
+      fprintf(out, "{");
+
+      value* e = v->d.map.entries;
+      for (value* p = e; p != nil; p = p->next) {
+         if (p != e) {
+            fprintf(out, ", ");
+         }
+         print(i, p->d.entry.key, out);
+         fprintf(out, " ");
+         print(i, p->d.entry.val, out);
+      }
+
+      fprintf(out, "}");
    }
    else if (v->tag == CONS_VALUE) {
       fprintf(out, "(");
@@ -766,6 +860,13 @@ void test_read_list(environment* i)
    assert(1 == number(car(l)));
 }
 
+void test_read_map(environment* i)
+{
+   value* m = readstr(i, "{1 2 3 4 5 6}");
+
+
+}
+
 void test_cons(environment* i)
 {
    value* v = number_value(i, 42);
@@ -814,6 +915,7 @@ void test_gc()
 
 void tests(environment* i)
 {
+   test_read_map(i);
    test_gc();
    test_string_write(i);
 
