@@ -148,6 +148,27 @@ struct value
 static value nil_value;
 value* nil = &nil_value;
 
+static value true_value;
+value* T = &true_value;
+
+const char* tag_name(value* v)
+{
+   u8 t = v->tag;
+   switch (t) {
+   case GARBAGE_VALUE: return "garbage";
+   case NUMBER_VALUE: return "number";
+   case STRING_VALUE: return "string";
+   case SYMBOL_VALUE: return "symbol";
+   case KEYWORD_VALUE: return "keyword";
+   case CONS_VALUE: return "list";
+   case BUILTIN_VALUE: return "builtin";
+   case PROC_VALUE: return "proc";
+   case MAP_VALUE: return "map";
+   case ENTRY_VALUE: return "mapentry";
+   default: return "unknown";
+   }
+}
+
 
 struct environment
 {
@@ -182,6 +203,55 @@ int number(value* v)
 char* string(value* v)
 {
    return v->d.string;
+}
+
+int compare(environment* env, value* a, value* b)
+{
+   if (a == b) {
+      return 0;
+   }
+
+   if (a->tag != b->tag) {
+      fprintf(stdout, "Can't compare different %s and %s!", tag_name(a), tag_name(b));
+      return -1;
+   }
+
+   return 0;
+}
+
+value* equals(environment* env, value* a, value* b)
+{
+   if (a == b) {
+      return T;
+   }
+
+   if (a->tag == b->tag) {
+      switch (a->tag) {
+      case NUMBER_VALUE:
+         if (number(a) == number(b)) {
+            return T;
+         }
+         break;
+      case STRING_VALUE:
+         if (strcmp(string(a), string(b)) == 0) {
+            return T;
+         }
+         break;
+      case CONS_VALUE:
+         while (a != nil && b != nil) {
+            if (equals(env, car(a), car(b)) == nil) {
+               return nil;
+            }
+            a = cdr(a);
+            b = cdr(b);
+         }
+         if (a == nil && b == nil) {
+            return T;
+         }
+         break;
+      }
+   }
+   return nil;
 }
 
 int mark(value* v, u32 gen)
@@ -459,8 +529,13 @@ value* read_symbol(environment* i, int c,  FILE* in, value*(*create_value)(envir
    *p++ = 0;
    ungetc(c, in);
 
-   if (namespace == 0 && strcmp(name, "nil") == 0) {
-      return nil;
+   if (namespace == 0) {
+      if (strcmp(name, "nil") == 0) {
+         return nil;
+      }
+      if (strcmp(name, "true") == 0) {
+         return T;
+      }
    }
 
    return create_value(i, namespace, name);
@@ -575,6 +650,9 @@ void print(environment* i, value* v, FILE* out)
 {
    if (v == nil) {
       fprintf(out, "nil");
+   }
+   else if (v == T) {
+      fprintf(out, "true");
    }
    else if (v->tag == GARBAGE_VALUE) {
        fprintf(out, "Internal error, trying to print garbage!?!\n");
@@ -974,6 +1052,8 @@ void repl(environment* i, FILE* in, FILE* out)
 
 #undef bind
 
+   env = bind_fn(i, env, "=", equals);
+
    while (true) {
       fprintf(out, "\n> "); fflush(out);
       v = read(i, in);
@@ -984,6 +1064,7 @@ void repl(environment* i, FILE* in, FILE* out)
       }
       v = eval(i, v, env);
       if (v) {
+         fprintf(out, "eval: ");
          println(i, v, out);
       }
       else
@@ -991,7 +1072,6 @@ void repl(environment* i, FILE* in, FILE* out)
          fprintf(out, "Bye\n");
          break;
       }
-      println(i, env, stdout);
       gc(i, env);
       stats(i);
    }
