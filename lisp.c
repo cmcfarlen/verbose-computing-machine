@@ -177,8 +177,10 @@ struct environment
    int alloc_count;
    int object_count;
    u32 generation;
-   value* symbols;
+
    value* free_list;
+   value* symbols; // interned symbols
+   value* defs;    // global symbol bindings (roots)
 };
 
 value* car(value* v)
@@ -189,6 +191,20 @@ value* car(value* v)
 value* cdr(value* v)
 {
    return v->d.cons.cdr;
+}
+
+value* set_car(value* v, value* n)
+{
+   assert(v->tag == CONS_VALUE);
+   v->d.cons.car = n;
+   return v;
+}
+
+value* set_cdr(value* v, value* n)
+{
+   assert(v->tag == CONS_VALUE);
+   v->d.cons.cdr = n;
+   return v;
 }
 
 value* cadr(value* v)
@@ -304,8 +320,12 @@ void gc(environment* env, value* roots)
    if (env->symbols == 0) {
       env->symbols = nil;
    }
+   if (env->defs == 0) {
+      env->defs = nil;
+   }
 
    mark_cnt += mark(env->symbols, g);
+   mark_cnt += mark(env->defs, g);
    mark_cnt += mark(roots, g);
 
    value* o = env->object_root.next;
@@ -595,7 +615,7 @@ value* read(environment* env, FILE* in)
             c = fgetc(in);
          }
          ungetc(c, in);
-         return number_value(env, n);
+         return number_value(env, sign * n);
       }
       // read string
       else if (c == '"') {
@@ -774,15 +794,19 @@ value* readstr(environment* l, const char* s)
    return v;
 }
 
-value* lookup_symbol(value* env, value* sym)
+/*
+ * return the binding pair or nil if not found
+ */
+value* find_binding(value* env, value* sym)
 {
    value* i = env;
    while (i != nil) {
-      value* s = car(car(i));
+      value* binding = car(i);
+      value* s = car(binding);
       // TODO: just check names for now
       if (strcmp(s->d.symbol.name, sym->d.symbol.name) == 0)
       {
-         return cdr(car(i));
+         return binding;
       }
       i = cdr(i);
    }
@@ -790,14 +814,45 @@ value* lookup_symbol(value* env, value* sym)
    return nil;
 }
 
-value* bind_symbol(environment* e, value* env, value* sym, value* v)
+value* lookup_symbol(environment* e, value* env, value* sym)
 {
-   value* existing = lookup_symbol(env, sym);
-   if (existing != nil) {
+   value* v = nil;
+   value* binding = find_binding(env, sym);
+   if (binding == nil) {
+      if (e->defs == 0) {
+         e->defs = nil;
+      }
+      binding = find_binding(e->defs, sym);
+   }
+
+   if (binding != nil) {
+      v = cdr(binding);
+      // TODO(check for and resolv var bindngs)
+   }
+
+   return v;
+}
+
+/*
+ * bind the symbol to v. Replaces an existing binding. Return v.
+ */
+value* bind_symbol(environment* e, value* sym, value* v)
+{
+
+   if (e->defs == 0)
+   {
+      e->defs = nil;
+   }
+
+   value* binding = find_binding(e->defs, sym);
+   if (binding != nil) {
       printf("replacing binding for symbol: ");
       print(e, sym, stdout);
       printf(" -> ");
-      println(e, existing, stdout);
+      println(e, cdr(binding), stdout);
+
+      binding->d.cons.cdr = v;
+      return v;
    }
 
    printf("Binding symbol: ");
@@ -806,17 +861,28 @@ value* bind_symbol(environment* e, value* env, value* sym, value* v)
    print(e, v, stdout);
    printf("\n");
 
-   return cons(e, cons(e, sym, v), env);
+   e->defs = cons(e, cons(e, sym, v), e->defs);
+   return v;
 }
 
-value* bind_fn(environment* e, value* env, char* s, builtin_fn f)
+value* bind_fn(environment* e, char* s, builtin_fn f)
 {
-   return bind_symbol(e, env, symbol_value(e, 0, s), builtin_value(e, f));
+   return bind_symbol(e, symbol_value(e, 0, s), builtin_value(e, f));
 }
 
 value* bind_var(environment* e, value* sym, value* v)
 {
+   // look for existing binding
+
    return nil;
+}
+
+/*
+ * extend the given local env with sym and v
+ */
+value* extend_env(environment* e, value* env, value* sym, value* v)
+{
+   return cons(e, cons(e, sym, v), env);
 }
 
 value* eval(environment* e, value*, value*);
@@ -864,7 +930,7 @@ value* apply(environment* e, value* f, value* args)
             printf("Wrong number of args to fn");
             return nil;
          }
-         env = bind_symbol(e, env, car(arglist), car(args));
+         env = extend_env(e, env, car(arglist), car(args));
          arglist = cdr(arglist);
          args = cdr(args);
       }
@@ -884,7 +950,7 @@ value* eval(environment* e, value* expr, value* env)
 {
    u8 t = expr->tag;
    if (t == SYMBOL_VALUE) {
-      value* s = lookup_symbol(env, expr);
+      value* s = lookup_symbol(e, env, expr);
       if (s == nil) {
          printf("no binding for: %s\n", expr->d.symbol.name);
       }
@@ -945,6 +1011,7 @@ void test_read_list(environment* i)
 void test_read_map(environment* i)
 {
    value* m = readstr(i, "{1 2 3 4 5 6}");
+   println(i, m, stdout);
 
    gc(i, nil);
 
@@ -983,9 +1050,9 @@ void test_string_write(environment* e)
 
 void test_gc()
 {
-   environment env = {0};
+   environment env = {{0}};
 
-   value* sym = symbol_value(&env, 0, "test");
+   symbol_value(&env, 0, "test");
 
    gc(&env, nil);
 
@@ -1002,10 +1069,10 @@ void tests(environment* i)
    test_gc();
    test_string_write(i);
 
-   print(i, eval(i, readstr(i, "((fn (x) x) 42)"), nil), stdout);
+   println(i, eval(i, readstr(i, "((fn (x) x) 42)"), nil), stdout);
 
-   print(i, eval(i, readstr(i, "(fn (x) (inc x))"), nil), stdout);
-
+   value* v = eval(i, readstr(i, "(fn (x) (inc x))"), nil);
+   println(i, v, stdout);
 
    test_read_list(i);
    test_read_number(i);
@@ -1046,9 +1113,8 @@ value* stats(environment* env)
 void repl(environment* i, FILE* in, FILE* out)
 {
    value* v = 0;
-   value* env = nil;
 
-#define bind(f) env = bind_fn(i, env, #f, (builtin_fn) f)
+#define bind(f) bind_fn(i, #f, (builtin_fn) f)
 
    bind(identity);
    bind(inc);
@@ -1057,7 +1123,7 @@ void repl(environment* i, FILE* in, FILE* out)
 
 #undef bind
 
-   env = bind_fn(i, env, "=", equals);
+   bind_fn(i, "=", equals);
 
    while (true) {
       fprintf(out, "\n> "); fflush(out);
@@ -1067,7 +1133,7 @@ void repl(environment* i, FILE* in, FILE* out)
          print(i, v, out);
          fprintf(out, "\n");
       }
-      v = eval(i, v, env);
+      v = eval(i, v, nil);
       if (v) {
          fprintf(out, "eval: ");
          println(i, v, out);
@@ -1077,16 +1143,15 @@ void repl(environment* i, FILE* in, FILE* out)
          fprintf(out, "Bye\n");
          break;
       }
-      println(i, env, out);
-      gc(i, env);
+      gc(i, nil);
       stats(i);
    }
 }
 
 int main(int argc, char** argv)
 {
-   size_t value_size = sizeof(value);
-   environment env = {0};
+   //size_t value_size = sizeof(value);
+   environment env = {{0}};
 
    tests(&env);
    repl(&env, stdin, stdout);
