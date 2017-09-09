@@ -84,6 +84,7 @@ FILE* string_open_write(char* buff, int len)
 // definitions
 
 typedef unsigned long u32;
+typedef unsigned short u16;
 typedef unsigned char u8;
 typedef int bool;
 
@@ -108,6 +109,11 @@ enum {
    VAR_VALUE
 };
 
+enum {
+   PTAG_NORMAL = 0x0,
+   PTAG_NUMBER = 0x1
+};
+
 typedef struct value value;
 typedef struct environment environment;
 typedef struct memory_arena memory_arena;
@@ -115,8 +121,8 @@ typedef value* (*builtin_fn)();
 
 struct value
 {
-   u8 tag;
-   u32 mark;
+   u16 tag;
+   u16 mark;
    value* next; // temp for playing with GC
    union {
       int number;
@@ -159,9 +165,29 @@ value* nil = &nil_value;
 static value true_value;
 value* T = &true_value;
 
+static inline int tag(value* v)
+{
+   uintptr_t t = ((uintptr_t)v & 0x7);
+   if (t == PTAG_NUMBER) {
+      return NUMBER_VALUE;
+   }
+   return v->tag;
+}
+
+static inline void set_tag(value* v, int t)
+{
+   v->tag = t;
+}
+
+// return true if v is a real pointer and not a tagged pointer
+static inline int is_value(value* v)
+{
+   return (0 == ((uintptr_t)v & 0x7));
+}
+
 const char* tag_name(value* v)
 {
-   u8 t = v->tag;
+   int t = tag(v);
    switch (t) {
    case GARBAGE_VALUE: return "garbage";
    case NUMBER_VALUE: return "number";
@@ -204,7 +230,7 @@ struct environment
    value object_root; // root object to keep track of allocated values
    int alloc_count;
    int object_count;
-   u32 generation;
+   u16 generation;
 
    value* free_list;
    value* symbols; // interned symbols
@@ -282,14 +308,14 @@ value* cdr(value* v)
 
 value* set_car(value* v, value* n)
 {
-   assert(v->tag == CONS_VALUE);
+   assert(tag(v) == CONS_VALUE);
    v->d.cons.car = n;
    return v;
 }
 
 value* set_cdr(value* v, value* n)
 {
-   assert(v->tag == CONS_VALUE);
+   assert(tag(v) == CONS_VALUE);
    v->d.cons.cdr = n;
    return v;
 }
@@ -301,7 +327,10 @@ value* cadr(value* v)
 
 int number(value* v)
 {
-   return v->d.number;
+   if (is_value(v)) {
+      return v->d.number;
+   }
+   return (int)((uintptr_t)v >> 3);
 }
 
 char* string(value* v)
@@ -315,7 +344,7 @@ int compare(environment* env, value* a, value* b)
       return 0;
    }
 
-   if (a->tag != b->tag) {
+   if (tag(a) != tag(b)) {
       fprintf(stdout, "Can't compare different %s and %s!", tag_name(a), tag_name(b));
       return -1;
    }
@@ -329,8 +358,8 @@ value* equals(environment* env, value* a, value* b)
       return T;
    }
 
-   if (a->tag == b->tag) {
-      switch (a->tag) {
+   if (tag(a) == tag(b)) {
+      switch (tag(a)) {
       case NUMBER_VALUE:
          if (number(a) == number(b)) {
             return T;
@@ -360,6 +389,10 @@ value* equals(environment* env, value* a, value* b)
 
 int mark(value* v, u32 gen)
 {
+   if (!is_value(v)) {
+      return 0;
+   }
+
    if (v == nil) {
       return 0;
    }
@@ -368,7 +401,7 @@ int mark(value* v, u32 gen)
        return 0;
    }
 
-   u8 t = v->tag;
+   u8 t = tag(v);
    if (t == GARBAGE_VALUE)
    {
        fprintf(stdout, "Fatal error! Trying to mark garbage!\n");
@@ -435,14 +468,14 @@ void gc(environment* env, value* roots)
             p->next = c->next;
          }
 
-         c->tag = GARBAGE_VALUE;
+         set_tag(c, GARBAGE_VALUE);
 
          c->next = env->free_list;
          env->free_list = c;
          ++garbage_cnt;
          --env->object_count;
       } else {
-         if (c->tag == STRING_VALUE && c->d.string) {
+         if (tag(c) == STRING_VALUE && c->d.string) {
             c->d.string = push_string(&env->strings[env->strings_idx], c->d.string, strlen(c->d.string));
          }
          p = c;
@@ -484,16 +517,21 @@ value* alloc_value(environment* env)
 
 value* number_value(environment* env, int n)
 {
+   uintptr_t v = (uintptr_t)n;
+   return (value*)((v << 3) | PTAG_NUMBER);
+
+#if 0
    value* v = alloc_value(env);
-   v->tag = NUMBER_VALUE;
+   set_tag(v, NUMBER_VALUE);
    v->d.number = n;
    return v;
+#endif
 }
 
 value* string_value(environment* env, char* s, int n)
 {
    value* v = alloc_value(env);
-   v->tag = STRING_VALUE;
+   set_tag(v, STRING_VALUE);
    v->d.string = push_string(&env->strings[env->strings_idx], s, n);
    return v;
 }
@@ -501,7 +539,7 @@ value* string_value(environment* env, char* s, int n)
 value* var_value(environment* env, value* sym, value* val, value* meta)
 {
    value* v = alloc_value(env);
-   v->tag = VAR_VALUE;
+   set_tag(v, VAR_VALUE);
    v->d.var.sym = sym;
    v->d.var.val = val;
    v->d.var.meta = meta;
@@ -511,7 +549,7 @@ value* var_value(environment* env, value* sym, value* val, value* meta)
 value* cons(environment* env, value* a, value* b)
 {
    value* cell = alloc_value(env);
-   cell->tag = CONS_VALUE;
+   set_tag(cell, CONS_VALUE);
    cell->d.cons.car = a;
    cell->d.cons.cdr = b;
    return cell;
@@ -533,7 +571,7 @@ value* symbol_value(environment* env, char* namespace, char* name)
    }
 
    value* v = alloc_value(env);
-   v->tag = SYMBOL_VALUE;
+   set_tag(v, SYMBOL_VALUE);
    if (namespace)
    {
       // TODO: real namespaces
@@ -552,7 +590,7 @@ value* symbol_value(environment* env, char* namespace, char* name)
 value* keyword_value(environment* env, char* namespace, char* name)
 {
    value* v = alloc_value(env);
-   v->tag = KEYWORD_VALUE;
+   set_tag(v, KEYWORD_VALUE);
    if (namespace)
    {
       v->d.symbol.namespace = strdup(namespace);
@@ -568,7 +606,7 @@ value* keyword_value(environment* env, char* namespace, char* name)
 value* builtin_value(environment* env, builtin_fn f)
 {
    value* v = alloc_value(env);
-   v->tag = BUILTIN_VALUE;
+   set_tag(v, BUILTIN_VALUE);
    v->d.builtin.proc = f;
    return v;
 }
@@ -576,7 +614,7 @@ value* builtin_value(environment* env, builtin_fn f)
 value* proc_value(environment* e, value* arglist, value* body, value* env)
 {
    value* v = alloc_value(e);
-   v->tag = PROC_VALUE;
+   set_tag(v, PROC_VALUE);
    v->d.proc.arglist = arglist;
    v->d.proc.body = body;
    v->d.proc.env = env;
@@ -587,7 +625,7 @@ value* proc_value(environment* e, value* arglist, value* body, value* env)
 value* entry_value(environment* e, value* key, value* val)
 {
    value* v = alloc_value(e);
-   v->tag = ENTRY_VALUE;
+   set_tag(v, ENTRY_VALUE);
    v->d.entry.key = key;
    v->d.entry.val = val;
    v->d.entry.next = nil;
@@ -598,7 +636,7 @@ value* entry_value(environment* e, value* key, value* val)
 value* map_value(environment* e, value* entries)
 {
    value* v = alloc_value(e);
-   v->tag = MAP_VALUE;
+   set_tag(v, MAP_VALUE);
    v->d.map.entries = entries;
 
    return v;
@@ -783,19 +821,20 @@ value* read(environment* env, FILE* in)
 
 void print(environment* i, value* v, FILE* out)
 {
+   int t = tag(v);
    if (v == nil) {
       fprintf(out, "nil");
    }
    else if (v == T) {
       fprintf(out, "true");
    }
-   else if (v->tag == GARBAGE_VALUE) {
+   else if (t == GARBAGE_VALUE) {
        fprintf(out, "Internal error, trying to print garbage!?!\n");
    }
-   else if (v->tag == NUMBER_VALUE) {
-      fprintf(out, "%d", v->d.number);
+   else if (t == NUMBER_VALUE) {
+      fprintf(out, "%d", number(v));
    }
-   else if (v->tag == STRING_VALUE) {
+   else if (tag(v) == STRING_VALUE) {
       char* p = v->d.string;
       fputc('"', out);
       while (*p) {
@@ -812,7 +851,7 @@ void print(environment* i, value* v, FILE* out)
       }
       fputc('"', out);
    }
-   else if (v->tag == SYMBOL_VALUE) {
+   else if (t == SYMBOL_VALUE) {
       if (v->d.symbol.namespace) {
          fprintf(out, "%s/%s", v->d.symbol.namespace, v->d.symbol.name);
       }
@@ -821,7 +860,7 @@ void print(environment* i, value* v, FILE* out)
          fprintf(out, "%s", v->d.symbol.name);
       }
    }
-   else if (v->tag == KEYWORD_VALUE) {
+   else if (t == KEYWORD_VALUE) {
       if (v->d.symbol.namespace) {
          fprintf(out, ":%s/%s", v->d.symbol.namespace, v->d.symbol.name);
       }
@@ -830,7 +869,7 @@ void print(environment* i, value* v, FILE* out)
          fprintf(out, ":%s", v->d.symbol.name);
       }
    }
-   else if (v->tag == MAP_VALUE) {
+   else if (t == MAP_VALUE) {
       fprintf(out, "{");
 
       value* e = v->d.map.entries;
@@ -845,10 +884,10 @@ void print(environment* i, value* v, FILE* out)
 
       fprintf(out, "}");
    }
-   else if (v->tag == CONS_VALUE) {
+   else if (t == CONS_VALUE) {
       fprintf(out, "(");
 
-      if (cdr(v) == nil || cdr(v)->tag == CONS_VALUE) {
+      if (cdr(v) == nil || tag(cdr(v)) == CONS_VALUE) {
          for (value* p = v; p != nil; p = cdr(p))
          {
             if (p != v)
@@ -865,10 +904,10 @@ void print(environment* i, value* v, FILE* out)
 
       fprintf(out, ")");
    }
-   else if (v->tag == BUILTIN_VALUE) {
+   else if (t == BUILTIN_VALUE) {
       fprintf(out, "#<builtin>");
    }
-   else if (v->tag == PROC_VALUE) {
+   else if (t == PROC_VALUE) {
       fprintf(out, "#<procedure:");
       print(i, v->d.proc.env, out);
       fprintf(out, ">");
@@ -881,7 +920,7 @@ void print(environment* i, value* v, FILE* out)
       fprintf(out, ")");
 #endif
 
-   } else if (v->tag == VAR_VALUE) {
+   } else if (t == VAR_VALUE) {
       fprintf(out, "#'");
       print(i, v->d.var.sym, out);
    }
@@ -951,7 +990,7 @@ value* lookup_symbol(environment* e, value* env, value* sym)
    if (binding != nil) {
       v = cdr(binding);
       // TODO(check for and resolv var bindngs)
-      if (v->tag == VAR_VALUE) {
+      if (tag(v) == VAR_VALUE) {
          v = v->d.var.val;
       }
    }
@@ -1023,7 +1062,7 @@ value* eval_args(environment* e, value* args, value* env)
 
 value* apply(environment* e, value* f, value* args)
 {
-   if (f->tag == BUILTIN_VALUE) {
+   if (tag(f) == BUILTIN_VALUE) {
       builtin_fn fn = f->d.builtin.proc;
       value* argv[10];
       int cnt = 0;
@@ -1046,7 +1085,7 @@ value* apply(environment* e, value* f, value* args)
       }
    }
 
-   if (f->tag == PROC_VALUE) {
+   if (tag(f) == PROC_VALUE) {
       value* arglist = f->d.proc.arglist;
       value* env = f->d.proc.env;
       value* body = f->d.proc.body;
@@ -1069,7 +1108,7 @@ value* apply(environment* e, value* f, value* args)
 
 int is_special_form(value* f, const char* s)
 {
-   return (f->tag == SYMBOL_VALUE) && strcmp(s, f->d.symbol.name) == 0;
+   return (tag(f) == SYMBOL_VALUE) && strcmp(s, f->d.symbol.name) == 0;
 }
 
 value* eval(environment* e, value* expr, value* env)
@@ -1078,7 +1117,7 @@ value* eval(environment* e, value* expr, value* env)
       return nil;
    }
 
-   u8 t = expr->tag;
+   u8 t = tag(expr);
    if (t == SYMBOL_VALUE) {
       value* s = lookup_symbol(e, env, expr);
       if (s == nil) {
@@ -1104,7 +1143,7 @@ value* eval(environment* e, value* expr, value* env)
       value* sym = car(cdr(expr));
       if (sym != nil) {
          value* b = find_binding(e->defs, sym);
-         if (b != nil && b->tag == VAR_VALUE) {
+         if (b != nil && tag(b) == VAR_VALUE) {
             return cdr(b);
          } else {
             printf("failed to find binding for: ");
@@ -1140,7 +1179,7 @@ value* eval(environment* e, value* expr, value* env)
          value* p = car(b);
          value* s = car(p);
          value* ex = car(cdr(p));
-         if (s->tag != SYMBOL_VALUE) {
+         if (tag(s) != SYMBOL_VALUE) {
             printf("left of binding form must be a symbol!");
             pr(e, s);
             return nil;
@@ -1296,7 +1335,7 @@ value* stats(environment* env)
 
 value* var_get(environment* env, value* var)
 {
-   if (var->tag == VAR_VALUE) {
+   if (tag(var) == VAR_VALUE) {
       return var->d.var.val;
    }
    printf("var-get called with non-var value");
@@ -1360,6 +1399,9 @@ int main(int argc, char** argv)
    //size_t value_size = sizeof(value);
    size_t len = sizeof(environment) + (sizeof(value) * 512) + (1024*10) + 4096;
    u8* buffer = (u8*)malloc(len);
+
+   uintptr_t v = (uintptr_t)buffer;
+   assert((0x7 & v) == 0);
 
    environment* env = create_fixed_environment(buffer, len, 512, 4096);
 
