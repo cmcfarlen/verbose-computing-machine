@@ -187,7 +187,42 @@ struct environment
    value* free_list;
    value* symbols; // interned symbols
    value* defs;    // global symbol bindings (roots)
+
+   char* string_buffer;
+   int string_buffer_len;
 };
+
+environment* create_fixed_environment(u8* buffer, int buffer_len, int free_cnt)
+{
+   assert(buffer_len >= (sizeof(environment) + sizeof(value)*free_cnt));
+
+   u8* p = buffer;
+
+   environment* env = (environment*)p;
+   p += sizeof(environment);
+
+   env->object_root.tag = GARBAGE_VALUE;
+   env->object_root.next = 0;
+
+   env->alloc_count = 0;
+   env->object_count = 0;
+   env->generation = 0;
+
+
+   env->free_list = nil;
+   while (free_cnt--) {
+      value* v = (value*)p;
+      v->next = env->free_list;
+      env->free_list = v;
+      p += sizeof(value);
+   }
+
+   // TODO: save string data here
+   env->string_buffer = (char*)p;
+   env->string_buffer_len = buffer_len - (sizeof(environment) + sizeof(value) * free_cnt);
+
+   return env;
+}
 
 value* car(value* v)
 {
@@ -384,8 +419,15 @@ value* alloc_value(environment* env)
       v = env->free_list;
       env->free_list = v->next;
    } else {
-      v = (value*)malloc(sizeof(value));
-      env->alloc_count++;
+      gc(env, nil);
+
+      if (env->free_list) {
+         v = env->free_list;
+         env->free_list = v->next;
+      } else {
+         printf("free list exhausted. Goodbye cruel world.");
+         return nil;
+      }
    }
 
    v->next = env->object_root.next;
@@ -987,6 +1029,10 @@ int is_special_form(value* f, const char* s)
 
 value* eval(environment* e, value* expr, value* env)
 {
+   if (nil == expr) {
+      return nil;
+   }
+
    u8 t = expr->tag;
    if (t == SYMBOL_VALUE) {
       value* s = lookup_symbol(e, env, expr);
@@ -1279,10 +1325,13 @@ void repl(environment* i, FILE* in, FILE* out)
 int main(int argc, char** argv)
 {
    //size_t value_size = sizeof(value);
-   environment env = {{0}};
+   size_t len = 2 * sizeof(value) * 512;
+   u8* buffer = (u8*)malloc(len);
 
-   tests(&env);
-   repl(&env, stdin, stdout);
+   environment* env = create_fixed_environment(buffer, len, 512);
+
+   tests(env);
+   repl(env, stdin, stdout);
 
    return 0;
 }
