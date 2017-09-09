@@ -110,6 +110,7 @@ enum {
 
 typedef struct value value;
 typedef struct environment environment;
+typedef struct memory_arena memory_arena;
 typedef value* (*builtin_fn)();
 
 struct value
@@ -176,6 +177,27 @@ const char* tag_name(value* v)
    }
 }
 
+struct memory_arena
+{
+   char* buffer; // start of the arena
+   char* p; // current offset
+   int length; // length of the buffer
+};
+
+// len does not include the 0 term
+char* push_string(memory_arena* arena, char* str, int len)
+{
+   int rem = arena->length - (arena->p - arena->buffer);
+   char* ret = arena->p;
+   assert(rem > (len+1));
+
+   strncpy(arena->p, str, len);
+
+   arena->p += len;
+   *arena->p++ = 0;
+
+   return ret;
+}
 
 struct environment
 {
@@ -188,13 +210,14 @@ struct environment
    value* symbols; // interned symbols
    value* defs;    // global symbol bindings (roots)
 
-   char* string_buffer;
-   int string_buffer_len;
+   memory_arena interned;
+   memory_arena strings[2];
+   int strings_idx;
 };
 
-environment* create_fixed_environment(u8* buffer, int buffer_len, int free_cnt)
+environment* create_fixed_environment(u8* buffer, int buffer_len, int free_cnt, int intern_size)
 {
-   assert(buffer_len >= (sizeof(environment) + sizeof(value)*free_cnt));
+   assert(buffer_len >= (sizeof(environment) + sizeof(value)*free_cnt + intern_size));
 
    u8* p = buffer;
 
@@ -208,18 +231,35 @@ environment* create_fixed_environment(u8* buffer, int buffer_len, int free_cnt)
    env->object_count = 0;
    env->generation = 0;
 
-
    env->free_list = nil;
-   while (free_cnt--) {
+   int cnt = free_cnt;
+   while (cnt--) {
       value* v = (value*)p;
       v->next = env->free_list;
       env->free_list = v;
       p += sizeof(value);
    }
 
-   // TODO: save string data here
-   env->string_buffer = (char*)p;
-   env->string_buffer_len = buffer_len - (sizeof(environment) + sizeof(value) * free_cnt);
+   env->interned.buffer = (char*)p;
+   env->interned.p = (char*)p;
+   env->interned.length = intern_size;
+
+   p += intern_size;
+
+   int string_size = (buffer_len - (sizeof(environment) + sizeof(value) * free_cnt + intern_size)) / 2;
+
+   // initialize the string arenas
+   env->strings[0].buffer = (char*)p;
+   env->strings[0].p = (char*)p;
+   env->strings[0].length = string_size;
+
+   p += string_size;
+
+   env->strings[1].buffer = (char*)p;
+   env->strings[1].p = (char*)p;
+   env->strings[1].length = string_size;
+
+   env->strings_idx = 0;
 
    return env;
 }
@@ -380,6 +420,10 @@ void gc(environment* env, value* roots)
    mark_cnt += mark(env->defs, g);
    mark_cnt += mark(roots, g);
 
+   // swap to the other string arena for compaction
+   int sidx = env->strings_idx = 1 - env->strings_idx;
+   env->strings[sidx].p = env->strings[sidx].buffer;
+
    value* o = env->object_root.next;
    value* p = &env->object_root;
    while (o) {
@@ -391,9 +435,6 @@ void gc(environment* env, value* roots)
             p->next = c->next;
          }
 
-         if (c->tag == STRING_VALUE && c->d.string) {
-            free(c->d.string);
-         }
          c->tag = GARBAGE_VALUE;
 
          c->next = env->free_list;
@@ -401,6 +442,9 @@ void gc(environment* env, value* roots)
          ++garbage_cnt;
          --env->object_count;
       } else {
+         if (c->tag == STRING_VALUE && c->d.string) {
+            c->d.string = push_string(&env->strings[env->strings_idx], c->d.string, strlen(c->d.string));
+         }
          p = c;
       }
    }
@@ -450,8 +494,7 @@ value* string_value(environment* env, char* s, int n)
 {
    value* v = alloc_value(env);
    v->tag = STRING_VALUE;
-   // TODO: alloc strings in env
-   v->d.string = strndup(s, n);
+   v->d.string = push_string(&env->strings[env->strings_idx], s, n);
    return v;
 }
 
@@ -493,17 +536,19 @@ value* symbol_value(environment* env, char* namespace, char* name)
    v->tag = SYMBOL_VALUE;
    if (namespace)
    {
-      v->d.symbol.namespace = strdup(namespace);
+      // TODO: real namespaces
+      v->d.symbol.namespace = push_string(&env->interned, namespace, strlen(namespace));
    }
    else
    {
       v->d.symbol.namespace = 0;
    }
-   v->d.symbol.name = strdup(name);
+   v->d.symbol.name = push_string(&env->interned, name, strlen(name));
    env->symbols = cons(env, v, env->symbols);
    return v;
 }
 
+// TODO: intern keywords
 value* keyword_value(environment* env, char* namespace, char* name)
 {
    value* v = alloc_value(env);
@@ -1196,25 +1241,9 @@ void test_string_write(environment* e)
 
 }
 
-void test_gc()
-{
-   environment env = {{0}};
-
-   symbol_value(&env, 0, "test");
-
-   gc(&env, nil);
-
-   alloc_value(&env);
-   alloc_value(&env);
-   alloc_value(&env);
-
-   gc(&env, nil);
-}
-
 void tests(environment* i)
 {
    test_read_map(i);
-   test_gc();
    test_string_write(i);
 
    println(i, eval(i, readstr(i, "((fn (x) x) 42)"), nil), stdout);
@@ -1257,6 +1286,10 @@ value* stats(environment* env)
 
    printf("global binding table:\n");
    println(env, env->defs, stdout);
+
+   printf("string arena: %i\n", env->strings_idx);
+   printf("string arena use: %i of %i\n", (int)(env->strings[env->strings_idx].p - env->strings[env->strings_idx].buffer), env->strings[env->strings_idx].length);
+   printf("interned arena use: %i of %i\n", (int)(env->interned.p - env->interned.buffer), env->interned.length);
 
    return nil;
 }
@@ -1325,10 +1358,10 @@ void repl(environment* i, FILE* in, FILE* out)
 int main(int argc, char** argv)
 {
    //size_t value_size = sizeof(value);
-   size_t len = 2 * sizeof(value) * 512;
+   size_t len = sizeof(environment) + (sizeof(value) * 512) + (1024*10) + 4096;
    u8* buffer = (u8*)malloc(len);
 
-   environment* env = create_fixed_environment(buffer, len, 512);
+   environment* env = create_fixed_environment(buffer, len, 512, 4096);
 
    tests(env);
    repl(env, stdin, stdout);
