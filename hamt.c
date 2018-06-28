@@ -1,12 +1,12 @@
 // https://infoscience.epfl.ch/record/64398/files/idealhashtrees.pdf
 
 #include <stdio.h>
+#include <nmmintrin.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <memory.h>
 #include <assert.h>
-
 
 #define T 32
 #define T_BITS 5
@@ -37,29 +37,7 @@ typedef struct amt
    compare_fn_t compare_fn;
 } amt;
 
-#ifdef _MSC_VER
 int _mm_popcnt_u32(unsigned int);
-
-int ctpop(uintptr_t v)
-{
-   return _mm_popcnt_u32(v & 0xffffffff);
-}
-
-#else
-
-static inline int ctpop(uintptr_t v)
-{
-   return __builtin_popcount(v & 0xffffffff);
-}
-
-#endif
-
-void* aligned_malloc(size_t len)
-{
-   void* r = malloc(len);
-   assert(0 == ((uintptr_t)r & 0xf));
-   return r;
-}
 
 uint32_t hash_key(const char* key, uint32_t len, int level)
 {
@@ -80,6 +58,10 @@ uint32_t hash_string_key(void* k, int level)
    return hash_key((const char*)k, (uint32_t)strlen((const char*)k), level);
 }
 
+int ctpop(uintptr_t v)
+{
+   return _mm_popcnt_u32(v & 0xffffffff);
+}
 
 int compare_string_key(void* a, void* b)
 {
@@ -100,7 +82,7 @@ void* ptoptr(uintptr_t p)
 
 amt* create_amt(hash_fn_t f, compare_fn_t c)
 {
-   amt* result = aligned_malloc(sizeof(amt));
+   amt* result = malloc(sizeof(amt));
    memset(result, 0, sizeof(amt));
    result->hash_fn = f;
    result->compare_fn = c;
@@ -114,7 +96,7 @@ amt_entry* amt_alloc_node(amt* t, int len)
    freelist_node* next = t->freelists[len];
 
    if (!next) {
-      result = (amt_entry*)aligned_malloc(sizeof(amt_entry)*len);
+      result = (amt_entry*)malloc(sizeof(amt_entry)*len);
    } else {
       freelist_node* nnext = next->next;
       t->freelists[len] = nnext;
@@ -132,114 +114,226 @@ void amt_free_node(amt* t, void* e, int len)
    t->freelists[len] = n;
 }
 
-void insert_node(amt* t, amt_entry* e, int level, uint32_t hash, void* key, void* value)
-{
-   if (e->p & 0x1) {
-      // key/value entry
-      // collision, convert to table
-      amt_entry* ntable = amt_alloc_node(t, 1);
-
-      uint32_t ehash = t->hash_fn((void*)e->korm, level / T_REHASH_LEVELS);
-      if (ehash == hash) {
-         if (t->compare_fn((void*)e->korm, key)) {
-            // already inserted
-            return;
-         } else {
-            // hash collision
-            assert(0);
-         }
-      }
-      uint32_t eidx = level_index(ehash, level+1);
-      ntable->korm = e->korm;
-      ntable->p = e->p;
-      e->korm = (uintptr_t)(1 << eidx);
-      e->p = ((uintptr_t)ntable) | 0x2;
-      // fall through to subtable case
-   }
-
-   uint32_t nidx = level_index(hash, level+1);
-   uint32_t collides = (uintptr_t)(1 << nidx) & e->korm;
-   if (collides) {
-      amt_entry* se = (amt_entry*)ptoptr(e->p);
-      if (nidx == 0) {
-         insert_node(t, se, level+1, hash, key, value);
-      } else {
-         insert_node(t, se + ctpop(e->korm & (collides-1)), level+1, hash, key, value);
-      }
-   } else {
-      // add bit
-      uint32_t table_size = ctpop(e->korm);
-      amt_entry* ntable = amt_alloc_node(t, table_size+1);
-      amt_entry* te = ntable;
-      amt_entry* oe = (amt_entry*)ptoptr(e->p);
-      for (uint32_t i = 0; i < T; i++) {
-         if (i == nidx) {
-            te->korm = (uintptr_t)key;
-            te->p = ((uintptr_t)value | 0x1);
-            te++;
-         } else if (e->korm & (uintptr_t)(1 << i)) {
-            te->korm = oe->korm;
-            te->p = oe->p;
-            te++;
-            oe++;
-         }
-      }
-
-      e->korm |= (uintptr_t)(1 << nidx);
-      amt_free_node(t, ptoptr(e->p), table_size);
-      e->p = ((uintptr_t)ntable | 0x2);
-   }
-}
-
 void insert(amt* t, void* key, void* value)
 {
-   uint32_t hash = t->hash_fn(key, 0);
+#define TOIDX(h) (h >> shift_bits) & T_MASK
+   uint32_t shift_bits = T_ENTRIES - T_BITS;
+   uint32_t hash_level = 0;
+   uint32_t hash = t->hash_fn(key, hash_level);
 
-   uint32_t idx = level_index(hash, 0);
+   uint32_t idx = TOIDX(hash);
    amt_entry* e = t->entries + idx;
 
    if (0 == e->p) {
       e->korm = (uintptr_t)key;
       e->p = ((uintptr_t)value) | 0x1;
    } else {
-      insert_node(t, e, 0, hash, key, value);
-   }
-}
-
-void* find_entry(amt* t, amt_entry* e, int level, uint32_t hash, void* key)
-{
-   void * result = 0;
-   if (e->p & 0x1) {
-      if (t->compare_fn(ptoptr(e->korm), key)) {
-         result = (void*)ptoptr(e->p);
-      }
-   } else {
-      uint32_t idx = level_index(hash, level+1);
-      uint32_t collides = (uintptr_t)(1 << idx) & e->korm;
-      if (collides) {
-         amt_entry* se = (amt_entry*)ptoptr(e->p);
-         if (idx == 0) {
-            result = find_entry(t, se, level+1, hash, key);
+      while (1) {
+         if (shift_bits >= T_BITS) {
+            shift_bits -= T_BITS;
+            idx = TOIDX(hash);
          } else {
-            result = find_entry(t, se + ctpop(e->korm & (collides-1)), level+1, hash, key);
+            printf("Going to the next level!\n");
+            hash_level++;
+            shift_bits = T_ENTRIES - T_BITS;
+            hash = t->hash_fn(key, hash_level);
+            idx = TOIDX(hash);
+         }
+
+         if (e->p & 0x1) {
+            // key/value entry
+            // collision, convert to table
+            amt_entry* ntable = amt_alloc_node(t, 1);
+
+            uint32_t ehash = t->hash_fn((void*)e->korm, hash_level);
+            if (ehash == hash) {
+               if (t->compare_fn((void*)e->korm, key)) {
+                  // already inserted
+                  return;
+               } else {
+                  // hash collision
+                  assert(0);
+               }
+            }
+            uint32_t eidx = TOIDX(ehash);
+            ntable->korm = e->korm;
+            ntable->p = e->p;
+            e->korm = (uintptr_t)(1 << eidx);
+            e->p = ((uintptr_t)ntable) | 0x2;
+            // fall through to subtable case
+         }
+
+         uint32_t collides = (uintptr_t)(1 << idx) & e->korm;
+
+         if (collides) {
+            amt_entry* se = (amt_entry*)ptoptr(e->p);
+            if (idx == 0) {
+               e = se;
+            } else {
+               e = se + ctpop(e->korm & (collides-1));
+            }
+         } else {
+            // add bit
+            uint32_t table_size = ctpop(e->korm);
+            amt_entry* ntable = amt_alloc_node(t, table_size+1);
+            amt_entry* te = ntable;
+            amt_entry* oe = (amt_entry*)ptoptr(e->p);
+            for (uint32_t i = 0; i < T; i++) {
+               if (i == idx) {
+                  te->korm = (uintptr_t)key;
+                  te->p = ((uintptr_t)value | 0x1);
+                  te++;
+               } else if (e->korm & (uintptr_t)(1 << i)) {
+                  te->korm = oe->korm;
+                  te->p = oe->p;
+                  te++;
+                  oe++;
+               }
+            }
+
+            e->korm |= (uintptr_t)(1 << idx);
+            amt_free_node(t, ptoptr(e->p), table_size);
+            e->p = ((uintptr_t)ntable | 0x2);
+
+            return;
          }
       }
    }
-   return result;
+#undef TOIDX
 }
 
 void* find(amt* t, void* key)
 {
-   uint32_t hash = t->hash_fn(key, 0);
+#define TOIDX(h) (h >> shift_bits) & T_MASK
+   uint32_t shift_bits = T_ENTRIES - T_BITS;
+   uint32_t hash_level = 0;
+   uint32_t hash = t->hash_fn(key, hash_level);
 
-   uint32_t idx = level_index(hash, 0);
+   uint32_t idx = TOIDX(hash);
    amt_entry* e = t->entries + idx;
    void* result = 0;
 
-   if (e->p) {
-      result = find_entry(t, e, 0, hash, key);
+   while (e && e->p && !result) {
+      if (e->p & 0x1) {
+         if (t->compare_fn(ptoptr(e->korm), key)) {
+            result = (void*)ptoptr(e->p);
+         } else {
+            e = 0;
+         }
+      } else {
+         if (shift_bits >= T_BITS) {
+            shift_bits -= T_BITS;
+            idx = TOIDX(hash);
+         } else {
+            printf("Going to the next level!\n");
+            hash_level++;
+            shift_bits = T_ENTRIES - T_BITS;
+            hash = t->hash_fn(key, hash_level);
+            idx = TOIDX(hash);
+         }
+
+         uint32_t collides = (uintptr_t)(1 << idx) & e->korm;
+         if (collides) {
+            amt_entry* se = (amt_entry*)ptoptr(e->p);
+            if (idx == 0) {
+               e = se;
+            } else {
+               e = se + ctpop(e->korm & (collides-1));
+            }
+         } else {
+            e = 0;
+         }
+      }
+
    }
    return result;
+#undef TOIDX
+}
+
+void hamt_remove(amt* t, void* key)
+{
+#define TOIDX(h) (h >> shift_bits) & T_MASK
+   uint32_t shift_bits = T_ENTRIES - T_BITS;
+   uint32_t hash_level = 0;
+   uint32_t hash = t->hash_fn(key, hash_level);
+
+   uint32_t idx = TOIDX(hash);
+   amt_entry* e = t->entries + idx;
+   amt_entry* p = 0;
+
+   while (e && e->p) {
+      if (e->p & 0x1) {
+         if (t->compare_fn(ptoptr(e->korm), key)) {
+            // found it
+            if (p) {
+               int table_size = ctpop(p->korm);
+               amt_entry* table = (amt_entry*)ptoptr(p->p);
+               if (table_size > 2) {
+                  // reduce subtable size
+                  amt_entry* ntable = amt_alloc_node(t, table_size-1);
+                  amt_entry* te = ntable;
+                  amt_entry* oe = table;
+                  for (uint32_t i = 0; i < T; i++) {
+                     if (i == idx) {
+                        oe++;
+                     } else if (p->korm & (uintptr_t)(1 << i)) {
+                        te->korm = oe->korm;
+                        te->p = oe->p;
+                        te++;
+                        oe++;
+                     }
+                  }
+
+                  uintptr_t mask = (uintptr_t)(1 << idx);
+                  p->korm &= ~mask;
+                  p->p = ((uintptr_t)ntable | 0x2);
+               } else {
+                  // replace parent with other entry
+                  amt_entry* oe = table;
+                  if (e == table) {
+                     oe = table + 1;
+                  }
+
+                  p->korm = oe->korm;
+                  p->p = oe->p;
+               }
+               amt_free_node(t, (void*)table, table_size);
+            } else {
+               // key is in the root, just mark empty
+               e->p = 0;
+               e->korm = 0;
+            }
+         }
+         e = 0;
+      } else {
+         if (shift_bits >= T_BITS) {
+            shift_bits -= T_BITS;
+            idx = TOIDX(hash);
+         } else {
+            printf("Going to the next level!\n");
+            hash_level++;
+            shift_bits = T_ENTRIES - T_BITS;
+            hash = t->hash_fn(key, hash_level);
+            idx = TOIDX(hash);
+         }
+
+         uint32_t collides = (uintptr_t)(1 << idx) & e->korm;
+         if (collides) {
+            p = e;
+            amt_entry* se = (amt_entry*)ptoptr(e->p);
+            if (idx == 0) {
+               e = se;
+            } else {
+               e = se + ctpop(e->korm & (collides-1));
+            }
+         } else {
+            e = 0;
+         }
+      }
+
+   }
+#undef TOIDX
+
 }
 
 void visit_entry(amt_entry* e, void(*f)(void*, int, amt_entry*), void* arg, int level)
@@ -323,27 +417,29 @@ void insert_cstr(amt* t, const char* s)
    insert(t, (void*)s, (void*)s);
 }
 
-char* random_string(int len)
+char* random_string(char* buff, int len)
 {
    static char* chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-   char* buff = (char*)aligned_malloc(len+1);
    for (int i = 0; i < len; i++) {
       buff[i] = chars[rand() % 52];
    }
-   buff[len] = 0;
-   return buff;
+   buff[len-1] = 0;
+   return _strdup(buff);
 }
 
 int main(int argc, char** argv)
 {
-   void* memory = aligned_malloc(1024);
+   printf("hello world\n");
+   printf("popcnt: %i\n", _mm_popcnt_u32(0x01010101));
+
+   void* memory = malloc(1024);
 
    printf("memory pointer %p\n", memory);
    printf("T: %i\n", T);
    printf("T_BITS: %i\n", T_BITS);
    printf("T_ENTRIES: %i\n", T_ENTRIES);
    printf("T_MASK: 0x%x\n", T_MASK);
-   printf("amt_entry size: %ld\n", sizeof(amt_entry));
+   printf("amt_entry size: %lld\n", sizeof(amt_entry));
 
    free(memory);
 
@@ -353,16 +449,49 @@ int main(int argc, char** argv)
    insert_cstr(h, v);
 
    int cnt = 1000;
+   char* keys[1000];
+   char buff[32];
+   for (int i = 0; i < cnt; i++) {
+      keys[i] = random_string(buff, sizeof(buff));
+   }
+
    srand(0);
-   while (cnt--) {
-      insert_cstr(h, random_string(32));
+   for (int i = 0; i < cnt; i++) {
+      insert_cstr(h, keys[i]);
+   }
+
+   for (int i = 0; i < cnt; i++) {
+      void* t = find(h, keys[i]);
+      if (!t) {
+         printf("couldn't find key %i: %s\n", i, keys[i]);
+      }
+      if (strcmp(keys[i], (char*)t)) {
+         printf("looked for %s but got %s\n", keys[i], (char*)t);
+      }
    }
 
    print_stats(h);
 
-   void* f = find(h, (void*)v);
-   assert(f != 0);
-   printf("found this! %s\n", (char*)f);
+   assert(find(h, (void*)v));
+
+   hamt_remove(h, (void*)v);
+
+   print_stats(h);
+   assert(!find(h, (void*)v));
+
+   for (int i = 0; i < cnt; i++) {
+      hamt_remove(h, keys[i]);
+   }
+
+   print_stats(h);
+
+   for (int i = 0; i < cnt; i++) {
+      void* t = find(h, keys[i]);
+      if (t) {
+         printf("still found key %i: %s\n", i, keys[i]);
+      }
+   }
+
 
    return 0;
 }
