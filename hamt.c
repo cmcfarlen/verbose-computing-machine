@@ -37,7 +37,29 @@ typedef struct amt
    compare_fn_t compare_fn;
 } amt;
 
+#ifdef _MSC_VER
 int _mm_popcnt_u32(unsigned int);
+
+int ctpop(uintptr_t v)
+{
+   return _mm_popcnt_u32(v & 0xffffffff);
+}
+
+#else
+
+static inline int ctpop(uintptr_t v)
+{
+   return __builtin_popcount(v & 0xffffffff);
+}
+
+#endif
+
+void* aligned_malloc(size_t len)
+{
+   void* r = malloc(len);
+   assert(0 == ((uintptr_t)r & 0xf));
+   return r;
+}
 
 uint32_t hash_key(const char* key, uint32_t len, int level)
 {
@@ -58,10 +80,6 @@ uint32_t hash_string_key(void* k, int level)
    return hash_key((const char*)k, (uint32_t)strlen((const char*)k), level);
 }
 
-int ctpop(uintptr_t v)
-{
-   return _mm_popcnt_u32(v & 0xffffffff);
-}
 
 int compare_string_key(void* a, void* b)
 {
@@ -82,7 +100,7 @@ void* ptoptr(uintptr_t p)
 
 amt* create_amt(hash_fn_t f, compare_fn_t c)
 {
-   amt* result = malloc(sizeof(amt));
+   amt* result = aligned_malloc(sizeof(amt));
    memset(result, 0, sizeof(amt));
    result->hash_fn = f;
    result->compare_fn = c;
@@ -96,7 +114,7 @@ amt_entry* amt_alloc_node(amt* t, int len)
    freelist_node* next = t->freelists[len];
 
    if (!next) {
-      result = (amt_entry*)malloc(sizeof(amt_entry)*len);
+      result = (amt_entry*)aligned_malloc(sizeof(amt_entry)*len);
    } else {
       freelist_node* nnext = next->next;
       t->freelists[len] = nnext;
@@ -268,6 +286,10 @@ void hamt_remove(amt* t, void* key)
             if (p) {
                int table_size = ctpop(p->korm);
                amt_entry* table = (amt_entry*)ptoptr(p->p);
+
+               // unpossible!
+               assert(table_size != 1);
+
                if (table_size > 2) {
                   // reduce subtable size
                   amt_entry* ntable = amt_alloc_node(t, table_size-1);
@@ -417,42 +439,36 @@ void insert_cstr(amt* t, const char* s)
    insert(t, (void*)s, (void*)s);
 }
 
-char* random_string(char* buff, int len)
+char* random_string(int len)
 {
    static char* chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+   char* buff = (char*)aligned_malloc(len+1);
    for (int i = 0; i < len; i++) {
       buff[i] = chars[rand() % 52];
    }
-   buff[len-1] = 0;
-   return _strdup(buff);
+   buff[len] = 0;
+   return buff;
 }
 
 int main(int argc, char** argv)
 {
-   printf("hello world\n");
-   printf("popcnt: %i\n", _mm_popcnt_u32(0x01010101));
-
-   void* memory = malloc(1024);
+   void* memory = aligned_malloc(1024);
 
    printf("memory pointer %p\n", memory);
    printf("T: %i\n", T);
    printf("T_BITS: %i\n", T_BITS);
    printf("T_ENTRIES: %i\n", T_ENTRIES);
    printf("T_MASK: 0x%x\n", T_MASK);
-   printf("amt_entry size: %lld\n", sizeof(amt_entry));
+   printf("amt_entry size: %ld\n", sizeof(amt_entry));
 
    free(memory);
 
    amt* h = create_amt(hash_string_key, compare_string_key);
 
-   const char* v = "HEllow World\n";
-   insert_cstr(h, v);
-
    int cnt = 1000;
    char* keys[1000];
-   char buff[32];
    for (int i = 0; i < cnt; i++) {
-      keys[i] = random_string(buff, sizeof(buff));
+      keys[i] = random_string(32);
    }
 
    srand(0);
@@ -471,13 +487,6 @@ int main(int argc, char** argv)
    }
 
    print_stats(h);
-
-   assert(find(h, (void*)v));
-
-   hamt_remove(h, (void*)v);
-
-   print_stats(h);
-   assert(!find(h, (void*)v));
 
    for (int i = 0; i < cnt; i++) {
       hamt_remove(h, keys[i]);
