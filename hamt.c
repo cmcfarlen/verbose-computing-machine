@@ -111,13 +111,13 @@ amt* create_amt(hash_fn_t f, compare_fn_t c)
 amt_entry* amt_alloc_node(amt* t, int len)
 {
    amt_entry* result = 0;
-   freelist_node* next = t->freelists[len];
+   freelist_node* next = t->freelists[len-1];
 
    if (!next) {
       result = (amt_entry*)aligned_malloc(sizeof(amt_entry)*len);
    } else {
       freelist_node* nnext = next->next;
-      t->freelists[len] = nnext;
+      t->freelists[len-1] = nnext;
       result = &next->entry;
    }
    memset(result, 0, sizeof(amt_entry)*len);
@@ -128,102 +128,109 @@ void amt_free_node(amt* t, void* e, int len)
 {
    freelist_node* n = (freelist_node*)e;
 
-   n->next = t->freelists[len];
-   t->freelists[len] = n;
+   n->next = t->freelists[len-1];
+   t->freelists[len-1] = n;
 }
+
+#define TOIDX(h) (h >> shift_bits) & T_MASK
+
+void insert_recur(amt* t, amt_entry* e, uint32_t shift_bits, uint32_t hash, void* key, void* value)
+{
+   if (e->p & 0x1) {
+      uint32_t ehash = t->hash_fn((void*)e->korm, 0);
+      if (ehash == hash) {
+         if (t->compare_fn((void*)e->korm, key)) {
+            e->p = ((uintptr_t)value & 0x1);
+            return;
+         } else {
+            // TODO(cmcfarlen): handle hash collision
+            assert(0);
+         }
+      }
+
+      amt_entry* ntable = amt_alloc_node(t, 1);
+      uint32_t eidx = TOIDX(ehash);
+      ntable->korm = e->korm;
+      ntable->p = e->p;
+      e->korm = (uintptr_t)(1 << eidx);
+      e->p = ((uintptr_t)ntable) | 0x2;
+
+      insert_recur(t, e, shift_bits, hash, key, value);
+   } else {
+      uint32_t idx = TOIDX(hash);
+      uint32_t collides = (uintptr_t)(1 << idx) & e->korm;
+
+      if (collides) {
+         amt_entry* se = (amt_entry*)ptoptr(e->p);
+         e = se + ctpop(e->korm & (collides-1));
+         insert_recur(t, e, shift_bits + T_BITS, hash, key, value);
+      } else {
+         // add bit
+         uint32_t table_size = ctpop(e->korm);
+         amt_entry* ntable = amt_alloc_node(t, table_size+1);
+         amt_entry* te = ntable;
+         amt_entry* oe = (amt_entry*)ptoptr(e->p);
+         for (uint32_t i = 0; i < T; i++) {
+            if (i == idx) {
+               te->korm = (uintptr_t)key;
+               te->p = ((uintptr_t)value | 0x1);
+               te++;
+            } else if (e->korm & (uintptr_t)(1 << i)) {
+               te->korm = oe->korm;
+               te->p = oe->p;
+               te++;
+               oe++;
+            }
+         }
+
+         e->korm |= (uintptr_t)(1 << idx);
+         amt_free_node(t, ptoptr(e->p), table_size);
+         e->p = ((uintptr_t)ntable | 0x2);
+      }
+   }
+}
+
 
 void insert(amt* t, void* key, void* value)
 {
-#define TOIDX(h) (h >> shift_bits) & T_MASK
-   uint32_t shift_bits = T_ENTRIES - T_BITS;
+   uint32_t shift_bits = 0;
    uint32_t hash_level = 0;
    uint32_t hash = t->hash_fn(key, hash_level);
 
    uint32_t idx = TOIDX(hash);
    amt_entry* e = t->entries + idx;
 
-   if (0 == e->p) {
+   if (e->p == 0) {
       e->korm = (uintptr_t)key;
       e->p = ((uintptr_t)value) | 0x1;
    } else {
-      while (1) {
-         if (shift_bits >= T_BITS) {
-            shift_bits -= T_BITS;
-            idx = TOIDX(hash);
-         } else {
-            printf("Going to the next level!\n");
-            hash_level++;
-            shift_bits = T_ENTRIES - T_BITS;
-            hash = t->hash_fn(key, hash_level);
-            idx = TOIDX(hash);
-         }
+      insert_recur(t, e, shift_bits + T_BITS, hash, key, value);
+   }
+}
 
-         if (e->p & 0x1) {
-            // key/value entry
-            // collision, convert to table
-            amt_entry* ntable = amt_alloc_node(t, 1);
-
-            uint32_t ehash = t->hash_fn((void*)e->korm, hash_level);
-            if (ehash == hash) {
-               if (t->compare_fn((void*)e->korm, key)) {
-                  // already inserted
-                  return;
-               } else {
-                  // hash collision
-                  assert(0);
-               }
-            }
-            uint32_t eidx = TOIDX(ehash);
-            ntable->korm = e->korm;
-            ntable->p = e->p;
-            e->korm = (uintptr_t)(1 << eidx);
-            e->p = ((uintptr_t)ntable) | 0x2;
-            // fall through to subtable case
-         }
-
-         uint32_t collides = (uintptr_t)(1 << idx) & e->korm;
-
-         if (collides) {
-            amt_entry* se = (amt_entry*)ptoptr(e->p);
-            if (idx == 0) {
-               e = se;
-            } else {
-               e = se + ctpop(e->korm & (collides-1));
-            }
-         } else {
-            // add bit
-            uint32_t table_size = ctpop(e->korm);
-            amt_entry* ntable = amt_alloc_node(t, table_size+1);
-            amt_entry* te = ntable;
-            amt_entry* oe = (amt_entry*)ptoptr(e->p);
-            for (uint32_t i = 0; i < T; i++) {
-               if (i == idx) {
-                  te->korm = (uintptr_t)key;
-                  te->p = ((uintptr_t)value | 0x1);
-                  te++;
-               } else if (e->korm & (uintptr_t)(1 << i)) {
-                  te->korm = oe->korm;
-                  te->p = oe->p;
-                  te++;
-                  oe++;
-               }
-            }
-
-            e->korm |= (uintptr_t)(1 << idx);
-            amt_free_node(t, ptoptr(e->p), table_size);
-            e->p = ((uintptr_t)ntable | 0x2);
-
-            return;
-         }
+void* find_recur(amt* t, amt_entry* e, uint32_t shift_bits, uint32_t hash, void* key)
+{
+   void* result = 0;
+   if (e->p & 0x1) {
+      if (t->compare_fn(ptoptr(e->korm), key)) {
+         result = (void*)ptoptr(e->p);
+      }
+   } else {
+      uint32_t idx = TOIDX(hash);
+      uint32_t collides = (uintptr_t)(1 << idx) & e->korm;
+      if (collides) {
+         amt_entry* se = (amt_entry*)ptoptr(e->p);
+         e = se + ctpop(e->korm & (collides-1));
+         result = find_recur(t, e, shift_bits + T_BITS, hash, key);
       }
    }
-#undef TOIDX
+
+   return result;
 }
 
 void* find(amt* t, void* key)
 {
-#define TOIDX(h) (h >> shift_bits) & T_MASK
-   uint32_t shift_bits = T_ENTRIES - T_BITS;
+   uint32_t shift_bits = 0;
    uint32_t hash_level = 0;
    uint32_t hash = t->hash_fn(key, hash_level);
 
@@ -231,131 +238,87 @@ void* find(amt* t, void* key)
    amt_entry* e = t->entries + idx;
    void* result = 0;
 
-   while (e && e->p && !result) {
-      if (e->p & 0x1) {
-         if (t->compare_fn(ptoptr(e->korm), key)) {
-            result = (void*)ptoptr(e->p);
-         } else {
-            e = 0;
-         }
-      } else {
-         if (shift_bits >= T_BITS) {
-            shift_bits -= T_BITS;
-            idx = TOIDX(hash);
-         } else {
-            printf("Going to the next level!\n");
-            hash_level++;
-            shift_bits = T_ENTRIES - T_BITS;
-            hash = t->hash_fn(key, hash_level);
-            idx = TOIDX(hash);
-         }
-
-         uint32_t collides = (uintptr_t)(1 << idx) & e->korm;
-         if (collides) {
-            amt_entry* se = (amt_entry*)ptoptr(e->p);
-            if (idx == 0) {
-               e = se;
-            } else {
-               e = se + ctpop(e->korm & (collides-1));
-            }
-         } else {
-            e = 0;
-         }
-      }
-
+   if (e->p) {
+      result = find_recur(t, e, shift_bits + T_BITS, hash, key);
    }
    return result;
-#undef TOIDX
 }
 
-void hamt_remove(amt* t, void* key)
+void* hamt_remove_recur(amt* t, amt_entry* p, uint32_t idx, amt_entry* e, uint32_t shift_bits, uint32_t hash, void* key)
 {
-#define TOIDX(h) (h >> shift_bits) & T_MASK
-   uint32_t shift_bits = T_ENTRIES - T_BITS;
+   void* result = 0;
+   if (e->p & 0x1) {
+      if (t->compare_fn(ptoptr(e->korm), key)) {
+         result = (void*)ptoptr(e->p);
+         if (p) {
+            int table_size = ctpop(p->korm);
+            amt_entry* table = (amt_entry*)ptoptr(p->p);
+
+            // unpossible!
+            assert(table_size != 1);
+
+            if (table_size > 2) {
+               // reduce subtable size
+               amt_entry* ntable = amt_alloc_node(t, table_size-1);
+               amt_entry* te = ntable;
+               amt_entry* oe = table;
+               for (uint32_t i = 0; i < T; i++) {
+                  if (i == idx) {
+                     oe++;
+                  } else if (p->korm & (uintptr_t)(1 << i)) {
+                     te->korm = oe->korm;
+                     te->p = oe->p;
+                     te++;
+                     oe++;
+                  }
+               }
+
+               uintptr_t mask = (uintptr_t)(1 << idx);
+               p->korm &= ~mask;
+               p->p = ((uintptr_t)ntable | 0x2);
+            } else {
+               // replace parent with other entry
+               amt_entry* oe = table;
+               if (e == table) {
+                  oe = table + 1;
+               }
+
+               p->korm = oe->korm;
+               p->p = oe->p;
+            }
+            amt_free_node(t, (void*)table, table_size);
+         } else {
+            // key is in the root, just mark empty
+            e->p = 0;
+            e->korm = 0;
+         }
+      }
+   } else {
+      uint32_t eidx = TOIDX(hash);
+      uint32_t collides = (uintptr_t)(1 << eidx) & e->korm;
+      if (collides) {
+         amt_entry* se = (amt_entry*)ptoptr(e->p);
+         result = hamt_remove_recur(t, e, eidx, se + ctpop(e->korm & (collides-1)), shift_bits + T_BITS, hash, key);
+      }
+   }
+
+   return result;
+}
+
+void* hamt_remove(amt* t, void* key)
+{
+   uint32_t shift_bits = 0;
    uint32_t hash_level = 0;
    uint32_t hash = t->hash_fn(key, hash_level);
 
    uint32_t idx = TOIDX(hash);
    amt_entry* e = t->entries + idx;
-   amt_entry* p = 0;
+   void* result = 0;
 
-   while (e && e->p) {
-      if (e->p & 0x1) {
-         if (t->compare_fn(ptoptr(e->korm), key)) {
-            // found it
-            if (p) {
-               int table_size = ctpop(p->korm);
-               amt_entry* table = (amt_entry*)ptoptr(p->p);
-
-               // unpossible!
-               assert(table_size != 1);
-
-               if (table_size > 2) {
-                  // reduce subtable size
-                  amt_entry* ntable = amt_alloc_node(t, table_size-1);
-                  amt_entry* te = ntable;
-                  amt_entry* oe = table;
-                  for (uint32_t i = 0; i < T; i++) {
-                     if (i == idx) {
-                        oe++;
-                     } else if (p->korm & (uintptr_t)(1 << i)) {
-                        te->korm = oe->korm;
-                        te->p = oe->p;
-                        te++;
-                        oe++;
-                     }
-                  }
-
-                  uintptr_t mask = (uintptr_t)(1 << idx);
-                  p->korm &= ~mask;
-                  p->p = ((uintptr_t)ntable | 0x2);
-               } else {
-                  // replace parent with other entry
-                  amt_entry* oe = table;
-                  if (e == table) {
-                     oe = table + 1;
-                  }
-
-                  p->korm = oe->korm;
-                  p->p = oe->p;
-               }
-               amt_free_node(t, (void*)table, table_size);
-            } else {
-               // key is in the root, just mark empty
-               e->p = 0;
-               e->korm = 0;
-            }
-         }
-         e = 0;
-      } else {
-         if (shift_bits >= T_BITS) {
-            shift_bits -= T_BITS;
-            idx = TOIDX(hash);
-         } else {
-            printf("Going to the next level!\n");
-            hash_level++;
-            shift_bits = T_ENTRIES - T_BITS;
-            hash = t->hash_fn(key, hash_level);
-            idx = TOIDX(hash);
-         }
-
-         uint32_t collides = (uintptr_t)(1 << idx) & e->korm;
-         if (collides) {
-            p = e;
-            amt_entry* se = (amt_entry*)ptoptr(e->p);
-            if (idx == 0) {
-               e = se;
-            } else {
-               e = se + ctpop(e->korm & (collides-1));
-            }
-         } else {
-            e = 0;
-         }
-      }
-
+   if (e->p) {
+      result = hamt_remove_recur(t, 0, 0, e, shift_bits + T_BITS, hash, key);
    }
-#undef TOIDX
-
+   return result;
 }
 
 void visit_entry(amt_entry* e, void(*f)(void*, int, amt_entry*), void* arg, int level)
@@ -459,34 +422,34 @@ int main(int argc, char** argv)
    printf("T_BITS: %i\n", T_BITS);
    printf("T_ENTRIES: %i\n", T_ENTRIES);
    printf("T_MASK: 0x%x\n", T_MASK);
-   printf("amt_entry size: %ld\n", sizeof(amt_entry));
+   printf("amt_entry size: %lld\n", sizeof(amt_entry));
 
    free(memory);
 
    amt* h = create_amt(hash_string_key, compare_string_key);
 
-   int cnt = 1000;
-   char* keys[1000];
+   int cnt = 5000;
+   char** keys = (char**)malloc(sizeof(char*)*cnt);
    for (int i = 0; i < cnt; i++) {
-      keys[i] = random_string(32);
+      char* buff = (char*)malloc(32);
+      snprintf(buff, sizeof(buff), "key%d", i);
+      keys[i] = buff;
    }
 
-   srand(0);
    for (int i = 0; i < cnt; i++) {
       insert_cstr(h, keys[i]);
    }
+
+   print_stats(h);
 
    for (int i = 0; i < cnt; i++) {
       void* t = find(h, keys[i]);
       if (!t) {
          printf("couldn't find key %i: %s\n", i, keys[i]);
-      }
-      if (strcmp(keys[i], (char*)t)) {
+      } else if (strcmp(keys[i], (char*)t)) {
          printf("looked for %s but got %s\n", keys[i], (char*)t);
       }
    }
-
-   print_stats(h);
 
    for (int i = 0; i < cnt; i++) {
       hamt_remove(h, keys[i]);
@@ -500,7 +463,6 @@ int main(int argc, char** argv)
          printf("still found key %i: %s\n", i, keys[i]);
       }
    }
-
 
    return 0;
 }
