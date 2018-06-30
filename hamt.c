@@ -299,6 +299,17 @@ void* hamt_remove_recur(amt* t, amt_entry* p, uint32_t idx, amt_entry* e, uint32
       if (collides) {
          amt_entry* se = (amt_entry*)ptoptr(e->p);
          result = hamt_remove_recur(t, e, eidx, se + ctpop(e->korm & (collides-1)), shift_bits + T_BITS, hash, key);
+
+         if (e->p & 0x1 && p) {
+            int table_size = ctpop(p->korm);
+            if (table_size == 1) {
+               printf("%s: parent table size is one\n", (char*)key);
+               amt_entry* table = (amt_entry*)ptoptr(p->p);
+               p->korm = table->korm;
+               p->p = table->p;
+               amt_free_node(t, (void*)table, table_size);
+            }
+         }
       }
    }
 
@@ -362,6 +373,8 @@ typedef struct amt_stats
    int max_level;
 } amt_stats;
 
+static int print_keys = 0;
+
 void stat_visit(void* p, int level, amt_entry* e)
 {
    amt_stats* s = (amt_stats*)p;
@@ -370,6 +383,9 @@ void stat_visit(void* p, int level, amt_entry* e)
       s->max_level = level;
    }
    if (e->p & 0x1) {
+      if (print_keys) {
+         printf("key: %s\n", (char*)e->korm);
+      }
       s->key_count++;
    } else if (e->p & 2) {
       s->subtree_count++;
@@ -438,8 +454,19 @@ int main(int argc, char** argv)
 
    for (int i = 0; i < cnt; i++) {
       insert_cstr(h, keys[i]);
+      for (int j = 0; j < i; j++) {
+         char* t = (char*)find(h, keys[j]);
+         if (t) {
+            if (strcmp(t, keys[j]) != 0) {
+               printf("INSERT(%i, %i): expected %s but got %s\n", i, j, keys[j], t);
+            }
+         } else {
+            printf("INSERT(%i, %i): failed to find %s after inserting %s\n", i, j, keys[j], keys[i]);
+         }
+      }
    }
 
+   printf("After insert\n");
    print_stats(h);
 
    for (int i = 0; i < cnt; i++) {
@@ -452,9 +479,26 @@ int main(int argc, char** argv)
    }
 
    for (int i = 0; i < cnt; i++) {
-      hamt_remove(h, keys[i]);
+      char* result = (char*)hamt_remove(h, keys[i]);
+      if (result) {
+         if (strcmp(result, keys[i]) == 0) {
+            for (int j = i+1; j < cnt; j++) {
+               void* t = find(h, keys[j]);
+               if (!t) {
+                  printf("REMOVE(%i, %i): couldn't find key %s after removing %s\n", i, j, keys[j], keys[i]);
+               } else if (strcmp(keys[j], (char*)t)) {
+                  printf("REMOVE(%i, %i): looked for %s but got %s\n", i, j, keys[j], (char*)t);
+               }
+            }
+         } else {
+            printf("expected %s removed %s\n", keys[i], result);
+         }
+      } else {
+         printf("Failed to remove %s\n", keys[i]);
+      }
    }
 
+   print_keys = 1;
    print_stats(h);
 
    for (int i = 0; i < cnt; i++) {
@@ -463,6 +507,8 @@ int main(int argc, char** argv)
          printf("still found key %i: %s\n", i, keys[i]);
       }
    }
+
+   printf("Done!\n");
 
    return 0;
 }
