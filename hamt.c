@@ -313,7 +313,6 @@ void* hamt_remove_recur(amt* t, amt_entry* p, uint32_t idx, amt_entry* e, uint32
          if (e->p & 0x1 && p) {
             int table_size = ctpop(p->korm);
             if (table_size == 1) {
-               printf("%s: parent table size is one\n", (char*)key);
                amt_entry* table = (amt_entry*)ptoptr(p->p);
                p->korm = table->korm;
                p->p = table->p;
@@ -344,9 +343,8 @@ void* hamt_remove(amt* t, void* key)
 
 void visit_entry(amt_entry* e, void(*f)(void*, int, amt_entry*), void* arg, int level)
 {
-   if (e->p & 0x1) {
-      f(arg, level, e);
-   } else {
+   f(arg, level, e);
+   if (e->p & 0x2) {
       amt_entry* se = (amt_entry*)ptoptr(e->p);
       for (int i = 0; i < T; i++) {
          if (e->korm & (uintptr_t)(1 << i)) {
@@ -408,7 +406,7 @@ void print_stats(amt* t)
    size_t freelist_mem = 0;
    printf("Freelists:\n");
    for (int i = 0; i < T; i++) {
-      printf("%3i ", i);
+      printf("%3i ", i+1);
    }
    printf("\n");
    for (int i = 0; i < T; i++) {
@@ -420,11 +418,16 @@ void print_stats(amt* t)
 
    visit(t, stat_visit, &stats);
 
-   printf("max level: %i\n", stats.max_level);
-   printf("entry count: %i\n", stats.entry_count);
-   printf("key count: %i\n", stats.key_count);
-   printf("subtree count: %i\n", stats.subtree_count);
-   printf("freelist memory: %lld\n", freelist_mem);
+   if (stats.entry_count) {
+      printf("max level: %i\n", stats.max_level);
+      printf("entry count: %i\n", stats.entry_count);
+      printf("key count: %i\n", stats.key_count);
+      printf("subtree count: %i\n", stats.subtree_count);
+      printf("tree ration: %f\n", (float)stats.subtree_count / (float)stats.key_count);
+      printf("freelist memory: %lld\n", freelist_mem);
+   } else {
+      printf("empty\n");
+   }
 }
 
 void insert_cstr(amt* t, const char* s)
@@ -452,7 +455,7 @@ char* advance_to_alignment(char* p, uintptr_t align)
 char** make_random_keys(int count, int length)
 {
    uintptr_t align = 8;
-   size_t size = sizeof(char*) * count + sizeof(char) * (length+1+align) * count;
+   size_t size = sizeof(char*) * count + sizeof(char) * (length+1+align+align) * count;
    char* memory = (char*)malloc(size);
 
    char** keys = (char**)memory;
@@ -467,24 +470,11 @@ char** make_random_keys(int count, int length)
    return keys;
 }
 
-
-int main(int argc, char** argv)
+void test_random_keys(amt* h, int cnt)
 {
-   void* memory = aligned_malloc(1024);
-
-   printf("memory pointer %p\n", memory);
-   printf("T: %i\n", T);
-   printf("T_BITS: %i\n", T_BITS);
-   printf("T_ENTRIES: %i\n", T_ENTRIES);
-   printf("T_MASK: 0x%x\n", T_MASK);
-   printf("amt_entry size: %lld\n", sizeof(amt_entry));
-
-   free(memory);
-
-   amt* h = create_amt(hash_string_key, compare_string_key);
-
-   int cnt = 5000;
    char** keys = make_random_keys(cnt, 32);
+
+   printf("\n\nTesting with %i keys\n", cnt);
 
    for (int i = 0; i < cnt; i++) {
       insert_cstr(h, keys[i]);
@@ -532,7 +522,6 @@ int main(int argc, char** argv)
       }
    }
 
-   print_keys = 1;
    print_stats(h);
 
    for (int i = 0; i < cnt; i++) {
@@ -543,6 +532,34 @@ int main(int argc, char** argv)
    }
 
    printf("Done!\n");
+
+   free(keys);
+}
+
+
+int main(int argc, char** argv)
+{
+   void* memory = aligned_malloc(1024);
+
+   printf("memory pointer %p\n", memory);
+   printf("T: %i\n", T);
+   printf("T_BITS: %i\n", T_BITS);
+   printf("T_ENTRIES: %i\n", T_ENTRIES);
+   printf("T_MASK: 0x%x\n", T_MASK);
+   printf("amt_entry size: %lld\n", sizeof(amt_entry));
+
+   free(memory);
+
+   amt* h = create_amt(hash_string_key, compare_string_key);
+   test_random_keys(h, 10);
+   test_random_keys(h, 100);
+   test_random_keys(h, 1000);
+   test_random_keys(h, 2000);
+   test_random_keys(h, 5000);
+   test_random_keys(h, 2000);
+   test_random_keys(h, 1000);
+   test_random_keys(h, 100);
+   test_random_keys(h, 10);
 
    return 0;
 }
