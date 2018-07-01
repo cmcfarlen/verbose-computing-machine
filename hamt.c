@@ -190,7 +190,6 @@ void insert_recur(amt* t, amt_entry* e, uint32_t shift_bits, uint32_t hash, void
    }
 }
 
-
 void insert(amt* t, void* key, void* value)
 {
    uint32_t shift_bits = 0;
@@ -212,7 +211,7 @@ void* find_recur(amt* t, amt_entry* e, uint32_t shift_bits, uint32_t hash, void*
 {
    void* result = 0;
    if (e->p & 0x1) {
-      if (t->compare_fn(ptoptr(e->korm), key)) {
+      if (t->compare_fn((void*)e->korm, key)) {
          result = (void*)ptoptr(e->p);
       }
    } else {
@@ -248,7 +247,7 @@ void* hamt_remove_recur(amt* t, amt_entry* p, uint32_t idx, amt_entry* e, uint32
 {
    void* result = 0;
    if (e->p & 0x1) {
-      if (t->compare_fn(ptoptr(e->korm), key)) {
+      if (t->compare_fn((void*)e->korm, key)) {
          result = (void*)ptoptr(e->p);
          if (p) {
             int table_size = ctpop(p->korm);
@@ -274,7 +273,7 @@ void* hamt_remove_recur(amt* t, amt_entry* p, uint32_t idx, amt_entry* e, uint32
                }
 
                uintptr_t mask = (uintptr_t)(1 << idx);
-               p->korm &= ~mask;
+               p->korm ^= mask;
                p->p = ((uintptr_t)ntable | 0x2);
             } else {
                // replace parent with other entry
@@ -283,8 +282,19 @@ void* hamt_remove_recur(amt* t, amt_entry* p, uint32_t idx, amt_entry* e, uint32
                   oe = table + 1;
                }
 
-               p->korm = oe->korm;
-               p->p = oe->p;
+               if (oe->p & 0x1) {
+                  p->korm = oe->korm;
+                  p->p = oe->p;
+               } else {
+                  // if the other entry is a mask entry, then the heigh of the tree must be maintained
+                  amt_entry* ntable = amt_alloc_node(t, 1);
+                  ntable->korm = oe->korm;
+                  ntable->p = oe->p;
+
+                  uintptr_t mask = (uintptr_t)(1 << idx);
+                  p->korm ^= mask;
+                  p->p = ((uintptr_t)ntable | 0x2);
+               }
             }
             amt_free_node(t, (void*)table, table_size);
          } else {
@@ -395,13 +405,16 @@ void stat_visit(void* p, int level, amt_entry* e)
 void print_stats(amt* t)
 {
    amt_stats stats = {0};
+   size_t freelist_mem = 0;
    printf("Freelists:\n");
    for (int i = 0; i < T; i++) {
       printf("%3i ", i);
    }
    printf("\n");
    for (int i = 0; i < T; i++) {
-      printf("%3i ", count_list(t->freelists[i]));
+      int c = count_list(t->freelists[i]);
+      freelist_mem += (i+1) * c * sizeof(freelist_node);
+      printf("%3i ", c);
    }
    printf("\n");
 
@@ -411,6 +424,7 @@ void print_stats(amt* t)
    printf("entry count: %i\n", stats.entry_count);
    printf("key count: %i\n", stats.key_count);
    printf("subtree count: %i\n", stats.subtree_count);
+   printf("freelist memory: %lld\n", freelist_mem);
 }
 
 void insert_cstr(amt* t, const char* s)
@@ -418,16 +432,41 @@ void insert_cstr(amt* t, const char* s)
    insert(t, (void*)s, (void*)s);
 }
 
-char* random_string(int len)
+char* random_string(char* buff, int len)
 {
    static char* chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-   char* buff = (char*)aligned_malloc(len+1);
+   char* b = buff;
    for (int i = 0; i < len; i++) {
-      buff[i] = chars[rand() % 52];
+      *b++ = chars[rand() % 52];
    }
-   buff[len] = 0;
+   *b = 0;
    return buff;
 }
+
+char* advance_to_alignment(char* p, uintptr_t align)
+{
+   uintptr_t v = (uintptr_t)p;
+   return p + (align - (v & (align-1)));
+}
+
+char** make_random_keys(int count, int length)
+{
+   uintptr_t align = 8;
+   size_t size = sizeof(char*) * count + sizeof(char) * (length+1+align) * count;
+   char* memory = (char*)malloc(size);
+
+   char** keys = (char**)memory;
+   char* k = memory + sizeof(char*) * count;
+   for (int i = 0; i < count; i++) {
+      keys[i] = k;
+      random_string(k, length);
+      k += sizeof(char) * (length + 1);
+      k = advance_to_alignment(k, align);
+      assert((k + length + 1) < (memory + size));
+   }
+   return keys;
+}
+
 
 int main(int argc, char** argv)
 {
@@ -445,12 +484,7 @@ int main(int argc, char** argv)
    amt* h = create_amt(hash_string_key, compare_string_key);
 
    int cnt = 5000;
-   char** keys = (char**)malloc(sizeof(char*)*cnt);
-   for (int i = 0; i < cnt; i++) {
-      char* buff = (char*)malloc(32);
-      snprintf(buff, sizeof(buff), "key%d", i);
-      keys[i] = buff;
-   }
+   char** keys = make_random_keys(cnt, 32);
 
    for (int i = 0; i < cnt; i++) {
       insert_cstr(h, keys[i]);
