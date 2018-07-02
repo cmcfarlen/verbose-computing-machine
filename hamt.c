@@ -13,6 +13,7 @@
 #define T_ENTRIES (1 << T_BITS)
 #define T_MASK (T_ENTRIES - 1)
 #define T_REHASH_LEVELS 6
+#define ENTRY_POOL_SIZE 4096
 
 typedef uint32_t (*hash_fn_t)(void*,int);
 typedef int (*compare_fn_t)(void*,void*);
@@ -29,12 +30,21 @@ typedef union freelist_node
    amt_entry entry;
 } freelist_node;
 
+typedef struct amt_entry_pool
+{
+   struct amt_entry_pool* next;
+   char* b;
+   char* p;
+   char* e;
+} amt_entry_pool;
+
 typedef struct amt
 {
    amt_entry entries[T_ENTRIES];
    freelist_node* freelists[T_ENTRIES];
    hash_fn_t hash_fn;
    compare_fn_t compare_fn;
+   amt_entry_pool* pool;
 } amt;
 
 #ifdef _MSC_VER
@@ -54,11 +64,29 @@ static inline int ctpop(uintptr_t v)
 
 #endif
 
+char* advance_to_alignment(char* p, uintptr_t align)
+{
+   uintptr_t v = (uintptr_t)p;
+   return p + (align - (v & (align-1)));
+}
+
 void* aligned_malloc(size_t len)
 {
    void* r = malloc(len);
    assert(0 == ((uintptr_t)r & 0xf));
    return r;
+}
+
+amt_entry_pool* alloc_pool(size_t size)
+{
+   char* p = (char*)malloc(size);
+   amt_entry_pool* result = (amt_entry_pool*)p;
+   result->next = 0;
+   result->b = advance_to_alignment(p + sizeof(amt_entry_pool), 16);
+   result->e = p + size;
+   result->p = result->b;
+
+   return result;
 }
 
 uint32_t hash_key(const char* key, uint32_t len, int level)
@@ -104,6 +132,7 @@ amt* create_amt(hash_fn_t f, compare_fn_t c)
    memset(result, 0, sizeof(amt));
    result->hash_fn = f;
    result->compare_fn = c;
+   result->pool = alloc_pool(ENTRY_POOL_SIZE);
    return result;
 }
 
@@ -114,7 +143,16 @@ amt_entry* amt_alloc_node(amt* t, int len)
    freelist_node* next = t->freelists[len-1];
 
    if (!next) {
-      result = (amt_entry*)aligned_malloc(sizeof(amt_entry)*len);
+      size_t size = sizeof(amt_entry)*len;
+      size_t rem = t->pool->e - t->pool->p;
+      if (rem < size) {
+         amt_entry_pool* newpool = alloc_pool(ENTRY_POOL_SIZE);
+         newpool->next = t->pool;
+         t->pool = newpool;
+      }
+
+      result = (amt_entry*)t->pool->p;
+      t->pool->p += size;
    } else {
       freelist_node* nnext = next->next;
       t->freelists[len-1] = nnext;
@@ -444,12 +482,6 @@ char* random_string(char* buff, int len)
    }
    *b = 0;
    return buff;
-}
-
-char* advance_to_alignment(char* p, uintptr_t align)
-{
-   uintptr_t v = (uintptr_t)p;
-   return p + (align - (v & (align-1)));
 }
 
 char** make_random_keys(int count, int length)
