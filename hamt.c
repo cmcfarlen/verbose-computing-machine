@@ -170,6 +170,53 @@ void amt_free_node(amt* t, void* e, int len)
    t->freelists[len-1] = n;
 }
 
+void compact_entry(amt* t, amt_entry* e)
+{
+   uint32_t table_size = ctpop(e->korm);
+   amt_entry* otable = (amt_entry*)ptoptr(e->p);
+   amt_entry* ntable = amt_alloc_node(t, table_size);
+
+   for (int i = 0; i < table_size; i++) {
+      amt_entry* c = otable + i;
+      amt_entry* d = ntable + i;
+
+      d->korm = c->korm;
+      d->p = c->p;
+
+      if (d->p & 0x2) {
+         compact_entry(t, d);
+      }
+   }
+
+   e->p = (uintptr_t)ntable | 0x2;
+}
+
+void compact_tree(amt* t)
+{
+   amt_entry_pool* p = t->pool;
+
+   t->pool = alloc_pool(ENTRY_POOL_SIZE);
+
+   // clear the free list so new tables are allocated from new pools
+   for (int i = 0; i < T_ENTRIES; i++) {
+      t->freelists[i] = 0;
+   }
+
+   for (int i = 0; i < T_ENTRIES; i++) {
+      amt_entry* e = t->entries + i;
+      if (e->p & 0x2) {
+         compact_entry(t, e);
+      }
+   }
+
+   while (p) {
+      amt_entry_pool* tmp = p->next;
+      free(p);
+      p = tmp;
+   }
+}
+
+
 #define TOIDX(h) (h >> shift_bits) & T_MASK
 
 void insert_recur(amt* t, amt_entry* e, uint32_t shift_bits, uint32_t hash, void* key, void* value)
@@ -442,6 +489,7 @@ void print_stats(amt* t)
 {
    amt_stats stats = {0};
    size_t freelist_mem = 0;
+   size_t page_cnt = 0;
    printf("Freelists:\n");
    for (int i = 0; i < T; i++) {
       printf("%3i ", i+1);
@@ -454,6 +502,12 @@ void print_stats(amt* t)
    }
    printf("\n");
 
+   amt_entry_pool* p = t->pool;
+   while (p) {
+      page_cnt++;
+      p = p->next;
+   }
+
    visit(t, stat_visit, &stats);
 
    if (stats.entry_count) {
@@ -463,6 +517,7 @@ void print_stats(amt* t)
       printf("subtree count: %i\n", stats.subtree_count);
       printf("tree ration: %f\n", (float)stats.subtree_count / (float)stats.key_count);
       printf("freelist memory: %lld\n", freelist_mem);
+      printf("allocd pages: %ld(%ld bytes)\n", page_cnt, page_cnt*ENTRY_POOL_SIZE);
    } else {
       printf("empty\n");
    }
@@ -523,6 +578,11 @@ void test_random_keys(amt* h, int cnt)
    }
 
    printf("After insert\n");
+   print_stats(h);
+
+   compact_tree(h);
+
+   printf("After compaction\n");
    print_stats(h);
 
    for (int i = 0; i < cnt; i++) {
@@ -592,6 +652,9 @@ int main(int argc, char** argv)
    test_random_keys(h, 1000);
    test_random_keys(h, 100);
    test_random_keys(h, 10);
+
+   compact_tree(h);
+   print_stats(h);
 
    return 0;
 }
