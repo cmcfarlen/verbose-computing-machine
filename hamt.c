@@ -176,7 +176,7 @@ void compact_entry(amt* t, amt_entry* e)
    amt_entry* otable = (amt_entry*)ptoptr(e->p);
    amt_entry* ntable = amt_alloc_node(t, table_size);
 
-   for (int i = 0; i < table_size; i++) {
+   for (uint32_t i = 0; i < table_size; i++) {
       amt_entry* c = otable + i;
       amt_entry* d = ntable + i;
 
@@ -654,7 +654,7 @@ void print_stats(amt* t)
       printf("subtree count: %i\n", stats.subtree_count);
       printf("tree ratio: %f\n", (float)stats.subtree_count / (float)stats.key_count);
       printf("freelist memory: %lld\n", freelist_mem);
-      printf("allocd pages: %ld(%ld bytes)\n", page_cnt, page_cnt*ENTRY_POOL_SIZE);
+      printf("allocd pages: %zd(%zd bytes)\n", page_cnt, page_cnt*ENTRY_POOL_SIZE);
    } else {
       printf("empty\n");
    }
