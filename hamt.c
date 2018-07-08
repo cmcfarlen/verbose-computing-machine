@@ -426,6 +426,143 @@ void* hamt_remove(amt* t, void* key)
    return result;
 }
 
+#define HAMT_ITERATOR_STACK_DEPTH 8
+typedef struct hamt_iterator_entry
+{
+   amt_entry* table;
+   int table_idx;
+   int table_size;
+} hamt_iterator_entry;
+
+typedef struct hamt_iterator
+{
+   amt* t;
+   hamt_iterator_entry stack[HAMT_ITERATOR_STACK_DEPTH];
+   int stack_idx;
+} hamt_iterator;
+
+int hamt_iterator_is_end(hamt_iterator* it)
+{
+   return (it->stack_idx == 0) &&
+          (it->stack->table_idx == it->stack->table_size);
+}
+
+void hamt_iterator_next(hamt_iterator* it)
+{
+   if (!hamt_iterator_is_end(it)) {
+      hamt_iterator_entry* e = it->stack + it->stack_idx;
+
+      do {
+         e->table_idx++;
+         while (e->table_idx == e->table_size) {
+            if (it->stack_idx > 0) {
+               it->stack_idx--;
+               e--;
+               e->table_idx++;
+            } else {
+               e = 0;
+               break;
+            }
+         }
+
+         while (e && e->table[e->table_idx].p & 0x2) {
+            assert(it->stack_idx+1 < HAMT_ITERATOR_STACK_DEPTH);
+
+            int table_size = ctpop(e->table[e->table_idx].korm);
+            amt_entry* newtable = (amt_entry*)ptoptr(e->table[e->table_idx].p);
+            e++;
+            e->table = newtable;
+            e->table_size = table_size;
+            e->table_idx = 0;
+            it->stack_idx++;
+         }
+      } while (e && (e->table[e->table_idx].p & 0x1) == 0);
+
+      /*
+      e->table_idx++;
+      while (e->table_idx == e->table_size) {
+         if (it->stack_idx > 0) {
+            it->stack_idx--;
+            e--;
+            e->table_idx++;
+         } else {
+            e = 0;
+            break;
+         }
+      }
+
+      while (e && (e->table[e->table_idx].p & 0x1) == 0) {
+         if (e->table[e->table_idx].p & 0x2) {
+            assert(e->table_idx+1 < HAMT_ITERATOR_STACK_DEPTH);
+
+            int table_size = ctpop(e->table[e->table_idx].korm);
+            amt_entry* newtable = (amt_entry*)ptoptr(e->table[e->table_idx].p);
+            e++;
+            e->table = newtable;
+            e->table_size = table_size;
+            e->table_idx = -1;
+            it->stack_idx++;
+         }
+         e->table_idx++;
+         while (e->table_idx == e->table_size) {
+            if (it->stack_idx > 0) {
+               it->stack_idx--;
+               e--;
+               e->table_idx++;
+            } else {
+               e = 0;
+               break;
+            }
+         }
+      }
+      */
+   }
+}
+
+hamt_iterator* hamt_iterator_begin(hamt_iterator* it, amt* t)
+{
+   it->t = t;
+   it->stack_idx = 0;
+
+   hamt_iterator_entry* e = it->stack;
+
+
+   e->table = t->entries;
+   e->table_size = 32;
+   e->table_idx = -1;
+
+   hamt_iterator_next(it);
+
+   return it;
+}
+
+void* hamt_key(hamt_iterator* it)
+{
+   if (!hamt_iterator_is_end(it)) {
+      hamt_iterator_entry* e = it->stack + it->stack_idx;
+      amt_entry* p = e->table + e->table_idx;
+
+      assert(p->p & 0x1);
+
+      return (void*)p->korm;
+   }
+   return 0;
+}
+
+void* hamt_value(hamt_iterator* it)
+{
+   if (!hamt_iterator_is_end(it)) {
+      hamt_iterator_entry* e = it->stack + it->stack_idx;
+      amt_entry* p = e->table + e->table_idx;
+
+      assert(p->p & 0x1);
+
+      return (void*)ptoptr(p->p);
+   }
+   return 0;
+}
+
+
 void visit_entry(amt_entry* e, void(*f)(void*, int, amt_entry*), void* arg, int level)
 {
    f(arg, level, e);
@@ -515,7 +652,7 @@ void print_stats(amt* t)
       printf("entry count: %i\n", stats.entry_count);
       printf("key count: %i\n", stats.key_count);
       printf("subtree count: %i\n", stats.subtree_count);
-      printf("tree ration: %f\n", (float)stats.subtree_count / (float)stats.key_count);
+      printf("tree ratio: %f\n", (float)stats.subtree_count / (float)stats.key_count);
       printf("freelist memory: %lld\n", freelist_mem);
       printf("allocd pages: %ld(%ld bytes)\n", page_cnt, page_cnt*ENTRY_POOL_SIZE);
    } else {
@@ -628,6 +765,35 @@ void test_random_keys(amt* h, int cnt)
    free(keys);
 }
 
+void test_iterator(amt* h, int cnt)
+{
+   char** keys = make_random_keys(cnt, 32);
+
+   hamt_iterator it = {0};
+
+   hamt_iterator_begin(&it, h);
+   assert(hamt_iterator_is_end(&it));
+
+   for (int i = 0; i < cnt; i++) {
+      insert_cstr(h, keys[i]);
+   }
+
+   int c = 0;
+   hamt_iterator_begin(&it, h);
+   while (!hamt_iterator_is_end(&it)) {
+      assert(hamt_key(&it));
+      assert(hamt_value(&it));
+      c++;
+      hamt_iterator_next(&it);
+   }
+
+   printf("iterated %i times\n", c);
+   assert(c == cnt);
+
+   for (int i = 0; i < cnt; i++) {
+      hamt_remove(h, keys[i]);
+   }
+}
 
 int main(int argc, char** argv)
 {
@@ -643,6 +809,12 @@ int main(int argc, char** argv)
    free(memory);
 
    amt* h = create_amt(hash_string_key, compare_string_key);
+
+   test_iterator(h, 5);
+   test_iterator(h, 100);
+   test_iterator(h, 1000);
+   test_iterator(h, 5000);
+
    test_random_keys(h, 10);
    test_random_keys(h, 100);
    test_random_keys(h, 1000);
