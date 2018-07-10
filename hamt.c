@@ -56,10 +56,18 @@ int ctpop(uintptr_t v)
 }
 
 #else
+#include <x86intrin.h>
 
 static inline int ctpop(uintptr_t v)
 {
    return __builtin_popcount(v & 0xffffffff);
+}
+
+inline
+uint64_t clocks()
+{
+   unsigned int aux;
+   return __rdtscp(&aux);
 }
 
 #endif
@@ -68,13 +76,6 @@ char* advance_to_alignment(char* p, uintptr_t align)
 {
    uintptr_t v = (uintptr_t)p;
    return p + (align - (v & (align-1)));
-}
-
-void* aligned_malloc(size_t len)
-{
-   void* r = malloc(len);
-   assert(0 == ((uintptr_t)r & 0xf));
-   return r;
 }
 
 amt_entry_pool* alloc_pool(size_t size)
@@ -126,10 +127,8 @@ void* ptoptr(uintptr_t p)
    return (void*)(p & ~0x3);
 }
 
-amt* create_amt(hash_fn_t f, compare_fn_t c)
+amt* create_amt(amt* result, hash_fn_t f, compare_fn_t c)
 {
-   amt* result = aligned_malloc(sizeof(amt));
-   memset(result, 0, sizeof(amt));
    result->hash_fn = f;
    result->compare_fn = c;
    result->pool = alloc_pool(ENTRY_POOL_SIZE);
@@ -215,7 +214,6 @@ void compact_tree(amt* t)
       p = tmp;
    }
 }
-
 
 #define TOIDX(h) (h >> shift_bits) & T_MASK
 
@@ -477,45 +475,6 @@ void hamt_iterator_next(hamt_iterator* it)
             it->stack_idx++;
          }
       } while (e && (e->table[e->table_idx].p & 0x1) == 0);
-
-      /*
-      e->table_idx++;
-      while (e->table_idx == e->table_size) {
-         if (it->stack_idx > 0) {
-            it->stack_idx--;
-            e--;
-            e->table_idx++;
-         } else {
-            e = 0;
-            break;
-         }
-      }
-
-      while (e && (e->table[e->table_idx].p & 0x1) == 0) {
-         if (e->table[e->table_idx].p & 0x2) {
-            assert(e->table_idx+1 < HAMT_ITERATOR_STACK_DEPTH);
-
-            int table_size = ctpop(e->table[e->table_idx].korm);
-            amt_entry* newtable = (amt_entry*)ptoptr(e->table[e->table_idx].p);
-            e++;
-            e->table = newtable;
-            e->table_size = table_size;
-            e->table_idx = -1;
-            it->stack_idx++;
-         }
-         e->table_idx++;
-         while (e->table_idx == e->table_size) {
-            if (it->stack_idx > 0) {
-               it->stack_idx--;
-               e--;
-               e->table_idx++;
-            } else {
-               e = 0;
-               break;
-            }
-         }
-      }
-      */
    }
 }
 
@@ -797,18 +756,14 @@ void test_iterator(amt* h, int cnt)
 
 int main(int argc, char** argv)
 {
-   void* memory = aligned_malloc(1024);
-
-   printf("memory pointer %p\n", memory);
    printf("T: %i\n", T);
    printf("T_BITS: %i\n", T_BITS);
    printf("T_ENTRIES: %i\n", T_ENTRIES);
    printf("T_MASK: 0x%x\n", T_MASK);
    printf("amt_entry size: %lld\n", sizeof(amt_entry));
 
-   free(memory);
-
-   amt* h = create_amt(hash_string_key, compare_string_key);
+   amt ht = {};
+   amt* h = create_amt(&ht, hash_string_key, compare_string_key);
 
    test_iterator(h, 5);
    test_iterator(h, 100);
