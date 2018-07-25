@@ -93,14 +93,16 @@ void dot_node_node(bptree_node* n)
       for (int i = 0; i < n->count; i++) {
          printf("%lld|", *(n->keys + i));
       }
+      printf("<n> ");
+      printf("\",group=leafs];\n");
    } else {
       for (int i = 0; i < n->count; i++) {
          printf("<f%i> |%lld|", i, *(n->keys + i));
       }
       printf("<f%i> ", n->count);
+      printf("\"];\n");
    }
 
-   printf("\"];\n");
 
    if (!n->is_leaf) {
       void** p = n->pointers;
@@ -130,6 +132,14 @@ void dot_node_edges(bptree_node* n)
       }
       dot_node_edges((bptree_node*)*p);
    }
+   if (n->parent) {
+      printf("  \"node%p\" -> \"node%p\" [color = blue];\n", n, n->parent);
+   }
+   /*
+   if (n->is_leaf && n->next) {
+      printf("  \"node%p\":n -> \"node%p\" [color = red];\n", n, n->next);
+   }
+   */
 }
 
 void dot_tree(bptree* t)
@@ -210,7 +220,11 @@ void bptree_insert_node(bptree* t, bptree_node* n, bptree_key_t key, void* value
    *pv = tmpp;
    n->count++;
 
-   dot_tree(t);
+   if (!n->is_leaf) {
+      bptree_node* nn = (bptree_node*)value;
+      nn->parent = n;
+   }
+
    if (n->count == t->order) {
       bptree_node* newnode = alloc_node(t->order, n->is_leaf);
 
@@ -244,13 +258,18 @@ void bptree_insert_node(bptree* t, bptree_node* n, bptree_key_t key, void* value
 
       if (!n->is_leaf) {
          *pdst++ = *psrc++;
+
+         // reparent children of new node
+         bptree_node** cn = (bptree_node**)newnode->pointers;
+         for (int i = 0; i < (newnode->count+1); i++) {
+            cn[i]->parent = newnode;
+         }
       }
 
       // move a key to the parent
       if (n->parent) {
          // insert key into parent
          bptree_insert_node(t, n->parent, n->keys[keep], newnode);
-         newnode->parent = n->parent;
       } else {
          // split the root
          bptree_node* newroot = alloc_node(t->order, 0);
@@ -344,19 +363,14 @@ int main(int argc, char** argv)
 {
    printf("Hello World\n");
 
-   bptree t = {3, 0};
+   bptree t = {15, 0};
 
-   bptree_insert(&t, 2, 0);
-   bptree_insert(&t, 3, 0);
-   bptree_insert(&t, 1, 0);
-   bptree_insert(&t, 4, 0);
-   bptree_insert(&t, 5, 0);
-   bptree_insert(&t, 6, 0);
+   int keys = 100;
+   for (int i = 1; i <= keys; i++)
+   {
+      bptree_insert(&t, i, 0);
+   }
    dot_tree(&t);
-//   bptree_insert(&t, 7, 0);
-//   bptree_insert(&t, 8, 0);
-//   bptree_insert(&t, 9, 0);
-//   bptree_insert(&t, 10, 0);
 
    return 0;
 }
