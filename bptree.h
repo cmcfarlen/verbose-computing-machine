@@ -1,9 +1,9 @@
-#include <stdint.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <assert.h>
 
 // https://en.wikipedia.org/wiki/B%2B_tree
+
+#include <stdint.h>
+#include <stdlib.h>
+#include <assert.h>
 
 typedef struct bptree bptree;
 typedef struct bptree_node bptree_node;
@@ -23,76 +23,6 @@ struct bptree {
    bptree_node* root;
 };
 
-void dot_node_node(bptree_node* n)
-{
-
-   printf("  node%p [label = \"", n);
-
-   if (n->is_leaf) {
-      for (int i = 0; i < n->count; i++) {
-         printf("%lld|", *(n->keys + i));
-      }
-      printf("<n> ");
-      printf("\",group=leafs];\n");
-   } else {
-      for (int i = 0; i < n->count; i++) {
-         printf("<f%i> |%lld|", i, *(n->keys + i));
-      }
-      printf("<f%i> ", n->count);
-      printf("\"];\n");
-   }
-
-
-   if (!n->is_leaf) {
-      void** p = n->pointers;
-      int cnt = n->count;
-      while (cnt--) {
-         dot_node_node((bptree_node*)*p);
-         p++;
-      }
-      dot_node_node((bptree_node*)*p);
-   }
-}
-
-void dot_node_edges(bptree_node* n)
-{
-   if (!n->is_leaf) {
-      for (int i = 0; i < n->count; i++) {
-         printf("  \"node%p\":f%i -> \"node%p\";\n", n, i, *(n->pointers + i));
-      }
-      printf("  \"node%p\":f%i -> \"node%p\";\n", n, n->count, *(n->pointers + n->count));
-
-      int cnt = n->count;
-      void** p = n->pointers;
-
-      while (cnt--) {
-         dot_node_edges((bptree_node*)*p);
-         p++;
-      }
-      dot_node_edges((bptree_node*)*p);
-   }
-   if (n->parent) {
-      printf("  \"node%p\" -> \"node%p\" [color = blue];\n", n, n->parent);
-   }
-   /*
-   if (n->is_leaf && n->next) {
-      printf("  \"node%p\":n -> \"node%p\" [color = red];\n", n, n->next);
-   }
-   */
-}
-
-void dot_tree(bptree* t)
-{
-   printf("digraph g {\n");
-   printf(" node [shape=record,height=.1];\n");
-
-   dot_node_node(t->root);
-   dot_node_edges(t->root);
-
-   printf("}\n");
-}
-
-
 bptree_node* alloc_node(int order, int is_leaf) {
    size_t sz = sizeof(bptree_node) + sizeof(bptree_key_t) * order;
 
@@ -110,7 +40,7 @@ bptree_node* alloc_node(int order, int is_leaf) {
    nn->parent = 0;
    nn->next = 0;
    nn->keys = (bptree_key_t*)((char*)p + sizeof(bptree_node));
-   nn->pointers = (void*)((char*)p + sizeof(bptree_node) + sizeof(bptree_key_t) * order);
+   nn->pointers = (void**)((char*)p + sizeof(bptree_node) + sizeof(bptree_key_t) * order);
 
    return nn;
 }
@@ -240,16 +170,3 @@ int bptree_insert(bptree *t, bptree_key_t key, void* value)
    return 0;
 }
 
-int main(int argc, char** argv)
-{
-   bptree t = {7, 0};
-
-   int keys = 10;
-   for (int i = 1; i <= keys; i++)
-   {
-      bptree_insert(&t, i, 0);
-   }
-   dot_tree(&t);
-
-   return 0;
-}
