@@ -12,13 +12,13 @@ void dot_node_node(bptree_node* n)
 
    if (n->is_leaf) {
       for (int i = 0; i < n->count; i++) {
-         printf("%lld|", *(n->keys + i));
+         printf("%lu|", n->keys[i].key_size);
       }
       printf("<n> ");
       printf("\",group=leafs];\n");
    } else {
       for (int i = 0; i < n->count; i++) {
-         printf("<f%i> |%lld|", i, *(n->keys + i));
+         printf("<f%i> |%lu|", i, n->keys[i].key_size);
       }
       printf("<f%i> ", n->count);
       printf("\"];\n");
@@ -74,15 +74,20 @@ void dot_tree(bptree* t)
    printf("}\n");
 }
 
+int size_compare(bptree_key_t a, bptree_key_t b)
+{
+   return a.key_size - b.key_size;
+}
 
 int main(int argc, char** argv)
 {
-   bptree t = {7, 0};
+   bptree t = {7, 0, size_compare};
 
-   int keys = 10;
-   for (int i = 1; i <= keys; i++)
+   int keys = 50;
+   for (int i = 0; i <= keys; i++)
    {
-      bptree_insert(&t, i, 0);
+      bptree_key_t k = {50 - i, 0};
+      bptree_insert(&t, k, 0);
    }
    dot_tree(&t);
 

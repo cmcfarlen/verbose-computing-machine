@@ -7,7 +7,32 @@
 
 typedef struct bptree bptree;
 typedef struct bptree_node bptree_node;
-typedef uint64_t bptree_key_t;
+
+struct bptree_key_t {
+   size_t key_size;
+   void* key_data_p;
+};
+
+typedef int (*bptree_key_compare_fn)(bptree_key_t a, bptree_key_t b);
+
+// return keys_count if no keys are greater than keys.
+int bptree_find_first_greater_than(bptree_key_t* keys, size_t keys_count, bptree_key_t key, bptree_key_compare_fn compare)
+{
+   int low = 0;
+   int high = keys_count;
+
+   while (low != high) {
+      int mid = (low + high) / 2;
+      int cmp = compare(keys[mid], key);
+      if (cmp <= 0) {
+         low = mid + 1; // must be past mid
+      } else {
+         high = mid; // must be before high
+      }
+   }
+
+   return low;
+}
 
 struct bptree_node {
    int is_leaf;
@@ -21,6 +46,7 @@ struct bptree_node {
 struct bptree {
    int order;
    bptree_node* root;
+   bptree_key_compare_fn compare;
 };
 
 bptree_node* alloc_node(int order, int is_leaf) {
@@ -45,7 +71,7 @@ bptree_node* alloc_node(int order, int is_leaf) {
    return nn;
 }
 
-bptree_node* bptree_search_recur(bptree_node* n, bptree_key_t key)
+bptree_node* bptree_search_recur(bptree* t, bptree_node* n, bptree_key_t key)
 {
    if (n->is_leaf) {
       return n;
@@ -53,42 +79,32 @@ bptree_node* bptree_search_recur(bptree_node* n, bptree_key_t key)
 
    assert(n->count > 0);
 
-   for (int i = 0; i < n->count; i++) {
-      if (n->keys[i] > key) {
-         return bptree_search_recur((bptree_node*)n->pointers[i], key);
-      }
-   }
-   return bptree_search_recur((bptree_node*)n->pointers[n->count], key);
-}
+   int cmp = bptree_find_first_greater_than(n->keys, n->count, key, t->compare);
 
-bptree_node* bptree_search_for_leaf_with_key(bptree* t, bptree_key_t key)
-{
-   return bptree_search_recur(t->root, key);
+   assert(cmp <= n->count);
+
+   return bptree_search_recur(t, (bptree_node*)n->pointers[cmp], key);
 }
 
 void bptree_insert_node(bptree* t, bptree_node* n, bptree_key_t key, void* value)
 {
-   bptree_key_t tmp = key;
-   void* tmpp = value;
-   bptree_key_t* pk = n->keys;
+
+   int pos = bptree_find_first_greater_than(n->keys, n->count, key, t->compare);
+
+   for (int i = n->count; i > pos; i--) {
+      n->keys[i] = n->keys[i-1];
+   }
+   n->keys[pos] = key;
+
    void** pv = n->is_leaf ? n->pointers : n->pointers+1;
-   bptree_key_t* ek = n->keys + n->count;
-   while (pk < ek && *pk < key) {
-      ++pk;
-      ++pv;
+   for (int i = n->count; i > pos; i--) {
+      pv[i] = pv[i-1];
    }
-   while (pk < ek) {
-      bptree_key_t t2 = *pk;
-      void* p2 = *pv;
-      *pk++ = tmp;
-      *pv++ = tmpp;
-      tmp = t2;
-      tmpp = p2;
-   }
-   *pk = tmp;
-   *pv = tmpp;
+   pv[pos] = value;
+
    n->count++;
 
+   // make this node the newly inserted node's parent
    if (!n->is_leaf) {
       bptree_node* nn = (bptree_node*)value;
       nn->parent = n;
@@ -159,7 +175,7 @@ int bptree_insert(bptree *t, bptree_key_t key, void* value)
 {
    bptree_node* n = 0;
    if (t->root) {
-      n = bptree_search_recur(t->root, key);
+      n = bptree_search_recur(t, t->root, key);
    } else {
       n = alloc_node(t->order, 1);
       t->root = n;
