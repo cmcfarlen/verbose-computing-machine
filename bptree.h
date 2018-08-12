@@ -9,14 +9,14 @@ typedef struct bptree bptree;
 typedef struct bptree_node bptree_node;
 
 struct bptree_key_t {
-   size_t key_size;
+   int key_size;
    void* key_data_p;
 };
 
 typedef int (*bptree_key_compare_fn)(bptree_key_t a, bptree_key_t b);
 
-// return keys_count if no keys are greater than keys.
-int bptree_find_first_greater_than(bptree_key_t* keys, size_t keys_count, bptree_key_t key, bptree_key_compare_fn compare)
+// return keys_count(one past the end) if no keys are greater than keys.
+int bptree_find_first_greater_than(bptree_key_t* keys, int keys_count, bptree_key_t key, bptree_key_compare_fn compare)
 {
    int low = 0;
    int high = keys_count;
@@ -32,6 +32,44 @@ int bptree_find_first_greater_than(bptree_key_t* keys, size_t keys_count, bptree
    }
 
    return low;
+}
+
+int bptree_find_first_less_than(bptree_key_t* keys, int keys_count, bptree_key_t key, bptree_key_compare_fn compare)
+{
+   int low = 0;
+   int high = keys_count;
+
+   while (low != high) {
+      int mid = (low + high) / 2;
+      int cmp = compare(keys[mid], key);
+      if (cmp >= 0) {
+         high = mid;
+      } else {
+         low = mid;
+      }
+   }
+
+   return low;
+}
+
+int bptree_find_key(bptree_key_t* keys, int keys_count, bptree_key_t key, bptree_key_compare_fn compare)
+{
+   int low = 0;
+   int high = keys_count;
+
+   while (low != high) {
+      int mid = (low + high) / 2;
+      int cmp = compare(keys[mid], key);
+      if (cmp == 0) {
+         return mid;
+      } else if (cmp < 0) {
+         low = mid + 1;
+      } else {
+         high = mid;
+      }
+   }
+
+   return -1;
 }
 
 struct bptree_node {
@@ -185,4 +223,37 @@ int bptree_insert(bptree *t, bptree_key_t key, void* value)
 
    return 0;
 }
+
+void* bptree_find(bptree* t, bptree_key_t key)
+{
+   void* v = 0;
+   if (t->root) {
+      bptree_node* n = bptree_search_recur(t, t->root, key);
+
+      if (n) {
+         // TODO: to support duplicate keys, this will need to find the first key less than key and see if the next one matches
+         int idx = bptree_find_key(n->keys, n->count, key, t->compare);
+         if (idx != -1) {
+            v = n->pointers[idx];
+         }
+      }
+   }
+
+   return v;
+}
+
+struct bptree_iterator
+{
+   bptree* t;
+   bptree_node* n;
+   int key_idx;
+};
+
+int bptree_scan(bptree* t, bptree_key_t from)
+{
+
+}
+
+
+
 

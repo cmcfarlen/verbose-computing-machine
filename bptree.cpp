@@ -79,6 +79,12 @@ int size_compare(bptree_key_t a, bptree_key_t b)
    return a.key_size - b.key_size;
 }
 
+inline bptree_key_t int_key(int i)
+{
+   bptree_key_t k = {i, 0};
+   return k;
+}
+
 int main(int argc, char** argv)
 {
    bptree t = {7, 0, size_compare};
@@ -86,10 +92,14 @@ int main(int argc, char** argv)
    int keys = 50;
    for (int i = 0; i <= keys; i++)
    {
-      bptree_key_t k = {50 - i, 0};
-      bptree_insert(&t, k, 0);
+      bptree_key_t k = int_key(i);
+      bptree_insert(&t, k, (void*)(uintptr_t)i);
    }
    dot_tree(&t);
+
+   void* v = bptree_find(&t, int_key(5));
+   assert(v);
+   assert(5 == (int)(uintptr_t)v);
 
    return 0;
 }
