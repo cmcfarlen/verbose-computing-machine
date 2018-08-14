@@ -113,11 +113,10 @@ hamt_entry_pool* hamt_alloc_pool(size_t size)
    return result;
 }
 
-uint32_t hamt_hash_key(const char* key, uint32_t len, int level)
+uint32_t hamt_hash_key(uint32_t h, const char* key, uint32_t len, int level)
 {
    uint32_t a = 31415;
    uint32_t b = 27183;
-   uint32_t h = 0;
    uint32_t l = level + 1;
 
    while (len--) {
@@ -127,9 +126,14 @@ uint32_t hamt_hash_key(const char* key, uint32_t len, int level)
    return h;
 }
 
+uint32_t hamt_hash_key(const char* key, uint32_t len, int level)
+{
+   return hamt_hash_key(0, key, len, level);
+}
+
 int compare_string_key(void* a, void* b)
 {
-   return strcmp((char*)a, (char*)b) == 0;
+   return strcmp((char*)a, (char*)b);
 }
 
 // level 0 is most significant 5 bits
@@ -238,7 +242,7 @@ void hamt_insert_recur(hamt* t, hamt_entry* e, uint32_t shift_bits, uint32_t has
    if (e->p & 0x1) {
       uint32_t ehash = t->hash_fn((void*)e->korm, 0);
       if (ehash == hash) {
-         if (t->compare_fn((void*)e->korm, key)) {
+         if (t->compare_fn((void*)e->korm, key) == 0) {
             e->p = ((uintptr_t)value & 0x1);
             return;
          } else {
@@ -310,7 +314,7 @@ void* hamt_find_recur(hamt* t, hamt_entry* e, uint32_t shift_bits, uint32_t hash
 {
    void* result = 0;
    if (e->p & 0x1) {
-      if (t->compare_fn((void*)e->korm, key)) {
+      if (t->compare_fn((void*)e->korm, key) == 0) {
          result = (void*)ptoptr(e->p);
       }
    } else {
@@ -346,7 +350,7 @@ void* hamt_remove_recur(hamt* t, hamt_entry* p, uint32_t idx, hamt_entry* e, uin
 {
    void* result = 0;
    if (e->p & 0x1) {
-      if (t->compare_fn((void*)e->korm, key)) {
+      if (t->compare_fn((void*)e->korm, key) == 0) {
          result = (void*)ptoptr(e->p);
          if (p) {
             int table_size = ctpop(p->korm);

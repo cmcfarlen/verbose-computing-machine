@@ -39,13 +39,17 @@ int bptree_find_first_less_than(bptree_key_t* keys, int keys_count, bptree_key_t
    int low = 0;
    int high = keys_count;
 
-   while (low != high) {
-      int mid = (low + high) / 2;
-      int cmp = compare(keys[mid], key);
-      if (cmp >= 0) {
-         high = mid;
+   while (low < high) {
+      int mid = (low + high) / 2 + ((low + high) % 2); // round up!
+      if (mid < keys_count) {
+         int cmp = compare(keys[mid], key);
+         if (cmp >= 0) {
+            high = mid - 1;
+         } else {
+            low = mid;
+         }
       } else {
-         low = mid;
+         low = high = keys_count - 1; // all keys < key, set to last index
       }
    }
 
@@ -224,6 +228,11 @@ int bptree_insert(bptree *t, bptree_key_t key, void* value)
    return 0;
 }
 
+int bptree_insert(bptree *t, bptree_key_t key)
+{
+   return bptree_insert(t, key, 0);
+}
+
 void* bptree_find(bptree* t, bptree_key_t key)
 {
    void* v = 0;
@@ -249,9 +258,83 @@ struct bptree_iterator
    int key_idx;
 };
 
-int bptree_scan(bptree* t, bptree_key_t from)
+int bptree_end(bptree*t, bptree_iterator* it)
 {
+   if (t->root) {
+      bptree_node* n = t->root;
 
+      while (!n->is_leaf) {
+         n = (bptree_node*)n->pointers[n->count];
+      }
+
+      it->t = t;
+      it->n = n;
+      it->key_idx = n->count;
+      return 1;
+   }
+   return 0;
+}
+
+int bptree_begin(bptree*t, bptree_iterator* it)
+{
+   if (t->root) {
+      bptree_node* n = t->root;
+
+      while (!n->is_leaf) {
+         n = (bptree_node*)n->pointers[0];
+      }
+
+      it->t = t;
+      it->n = n;
+      it->key_idx = 0;
+      return 1;
+   }
+   return 0;
+}
+
+int bptree_iterator_is_end(bptree_iterator* it)
+{
+   return (it->n->next == 0 &&
+           it->n->count == it->key_idx);
+}
+
+void bptree_iterator_next(bptree_iterator* it)
+{
+   if (!bptree_iterator_is_end(it)) {
+      it->key_idx++;
+      if (it->key_idx == it->n->count && it->n->next) {
+         it->n = it->n->next;
+         it->key_idx = 0;
+      }
+   }
+}
+
+bptree_key_t bptree_key(bptree_iterator* it)
+{
+   return it->n->keys[it->key_idx];
+}
+
+void* bptree_value(bptree_iterator* it)
+{
+   return it->n->pointers[it->key_idx];
+}
+
+int bptree_scan(bptree* t, bptree_key_t after, bptree_iterator* it)
+{
+   if (t->root) {
+      bptree_node* n = bptree_search_recur(t, t->root, after);
+
+      if (n) {
+         int idx = bptree_find_first_greater_than(n->keys, n->count, after, t->compare);
+
+         it->t = t;
+         it->n = n;
+         it->key_idx = idx;
+         return 1;
+      }
+   }
+
+   return 0;
 }
 
 

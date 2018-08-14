@@ -12,13 +12,13 @@ void dot_node_node(bptree_node* n)
 
    if (n->is_leaf) {
       for (int i = 0; i < n->count; i++) {
-         printf("%lu|", n->keys[i].key_size);
+         printf("%d|", n->keys[i].key_size);
       }
       printf("<n> ");
       printf("\",group=leafs];\n");
    } else {
       for (int i = 0; i < n->count; i++) {
-         printf("<f%i> |%lu|", i, n->keys[i].key_size);
+         printf("<f%i> |%d|", i, n->keys[i].key_size);
       }
       printf("<f%i> ", n->count);
       printf("\"];\n");
@@ -85,8 +85,63 @@ inline bptree_key_t int_key(int i)
    return k;
 }
 
+void test_find_first_less_than()
+{
+   int key_count = 10;
+   bptree_key_t* keys = (bptree_key_t*)malloc(sizeof(bptree_key_t)*key_count);
+
+   for (int i = 0; i < key_count; i++) {
+      keys[i] = int_key(i);
+   }
+
+   int r = bptree_find_first_less_than(keys, key_count, int_key(3), size_compare);
+   assert(r == 2);
+
+   r = bptree_find_first_less_than(keys, key_count, int_key(5), size_compare);
+   assert(r == 4);
+
+   r = bptree_find_first_less_than(keys, key_count, int_key(10), size_compare);
+   assert(r == 9);
+
+   r = bptree_find_first_less_than(keys, key_count, int_key(0), size_compare);
+   // TODO: should this return -1?
+   assert(r == 0);
+}
+
+void test_scan()
+{
+   bptree t = {3, 0, size_compare};
+
+   int keys = 10;
+   for (int i = 0; i <= keys; i++)
+   {
+      bptree_key_t k = int_key(i);
+      bptree_insert(&t, k, (void*)(uintptr_t)i);
+   }
+
+   int k = 0;
+   bptree_iterator it;
+   bptree_begin(&t, &it);
+
+   while (!bptree_iterator_is_end(&it)) {
+      bptree_key_t ik = bptree_key(&it);
+
+      printf("%i\n", ik.key_size);
+      assert(ik.key_size == int_key(k).key_size);
+      k++;
+
+      bptree_iterator_next(&it);
+   }
+
+}
+
 int main(int argc, char** argv)
 {
+
+//   test_find_first_less_than();
+   test_scan();
+
+#if 0
    bptree t = {7, 0, size_compare};
 
    int keys = 50;
@@ -100,6 +155,7 @@ int main(int argc, char** argv)
    void* v = bptree_find(&t, int_key(5));
    assert(v);
    assert(5 == (int)(uintptr_t)v);
+#endif
 
    return 0;
 }
