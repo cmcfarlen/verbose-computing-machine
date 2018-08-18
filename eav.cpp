@@ -71,6 +71,31 @@ void* arena_allocate(memory_arena* arena, size_t size)
 
 #define push_struct(arena, type) (type *)arena_allocate(arena, sizeof(type))
 
+struct cons_cell
+{
+   void* car;
+   void* cdr;
+};
+
+inline
+void* car(cons_cell* c)
+{
+   if (c) {
+      return c->car;
+   }
+   return 0;
+}
+
+inline
+void* cdr(cons_cell* c)
+{
+   if (c) {
+     return c->cdr;
+   }
+   return 0;
+}
+
+// TODO: make keyword an opaque type
 struct keyword
 {
    const char* ns;
@@ -92,10 +117,12 @@ uint32_t hash_keyword(void* k, int lvl)
    return h;
 }
 
-int compare_keyword(void* ain, void* bin)
+int compare_keyword(const keyword* a, const keyword* b)
 {
-   keyword* a = (keyword*)ain;
-   keyword* b = (keyword*)bin;
+   if (a == b) {
+      return 0;
+   }
+
    int sc = strcmp(a->ns, b->ns);
    if (sc == 0) {
       sc = strcmp(a->n, b->n);
@@ -118,7 +145,7 @@ keyword* kw(const char* ns, const char* n)
       memory_arena* a = create_arena(4096);
       interned_keywords* ikw = push_struct(a, interned_keywords);
       ikw->arena = a;
-      hamt_init(&ikw->h, hash_keyword, compare_keyword);
+      hamt_init(&ikw->h, hash_keyword, (compare_fn_t)compare_keyword);
 
       global_keywords = ikw;
    }
@@ -156,6 +183,7 @@ enum value_type
    boolean_value,
    float_value,
    string_value,
+   keyword_value,
    ref_value
 };
 
@@ -172,6 +200,7 @@ struct datom
          int32_t s;
          char c[4];
       } s;
+      const keyword* kw;
    } v;
 };
 
@@ -193,6 +222,10 @@ void print_datom(datom* d)
       break;
    case ref_value:
       printf("[%lli %lli %lli %lli]", d->e, d->a, d->v.i, d->t);
+      break;
+   case keyword_value:
+      printf("[%lli %lli :%s/%s %lli]", d->e, d->a, d->v.kw->ns, d->v.kw->n, d->t);
+      //printf("[%lli %lli :kw %lli]", d->e, d->a, d->t);
       break;
    }
 }
@@ -224,6 +257,9 @@ int compare_value(datom* a, datom* b)
          case string_value:
             // TODO: don't use strcmp
             return strcmp(a->v.s.c, b->v.s.c);
+            break;
+         case keyword_value:
+            return compare_keyword(a->v.kw, b->v.kw);
             break;
       }
    } else {
@@ -274,6 +310,27 @@ int compare_aevt(bptree_key_t ak, bptree_key_t bk)
    }
 }
 
+int compare_avet(bptree_key_t ak, bptree_key_t bk)
+{
+   datom* a = key_to_datom(ak);
+   datom* b = key_to_datom(bk);
+
+   if (a->a == b->a) {
+      int vcmp = compare_value(a, b);
+      if (vcmp == 0) {
+         if (a->e == b->e) {
+            return a->t - b->t;
+         } else {
+            return a->e - b->e;
+         }
+      } else {
+         return vcmp;
+      }
+   } else {
+      return a->a - b->a;
+   }
+}
+
 int compare_vaet(bptree_key_t ak, bptree_key_t bk)
 {
    datom* a = key_to_datom(ak);
@@ -313,52 +370,32 @@ struct segment;
 struct partition
 {
    uint32_t id;
-   const char name[33];
+   const keyword* name;
    int32_t sequence;
-
 };
 
-struct cons_cell
-{
-   void* car;
-   void* cdr;
+struct attribute {
+   int64_t  id;
+   const keyword* ident;
+   const keyword* unique;
+   const keyword* valueType;
+   const char* doc;
 };
-
-inline
-void* car(cons_cell* c)
-{
-   if (c) {
-      return c->car;
-   }
-   return 0;
-}
-
-inline
-void* cdr(cons_cell* c)
-{
-   if (c) {
-     return c->cdr;
-   }
-   return 0;
-}
 
 struct database
 {
-   struct datom_index eavt;
-   struct datom_index aevt;
-   struct datom_index vaet;
-   struct datom_index avet;
-   struct partition* partitions;
+   memory_arena* arena;
+
+   datom_index eavt;
+   datom_index aevt;
+   datom_index vaet;
+   datom_index avet;
    int partition_count;
+   struct partition partitions[3];
+   int attribute_count;
+   attribute installed_attributes[256];
 };
 
-
-void init_database(database* db)
-{
-   init_index(&db->eavt, 7, compare_eavt);
-   init_index(&db->aevt, 7, compare_aevt);
-   init_index(&db->vaet, 7, compare_vaet);
-}
 
 struct transaction
 {
@@ -381,6 +418,53 @@ struct log
    struct log* next;
    struct transaction txn;
 };
+
+const keyword* db_ident = kw("db", "ident");
+const keyword* db_id = kw("db", "id");
+const keyword* db_valueType = kw("db", "valueType");
+const keyword* db_doc = kw("db", "doc");
+
+const keyword* db_unique = kw("db", "unique");
+const keyword* db_unique_value = kw("db.unique", "value");
+const keyword* db_unique_identity = kw("db.unique", "identity");
+
+const keyword* db_valueType_string = kw("db.type", "string");
+const keyword* db_valueType_int = kw("db.type", "int");
+const keyword* db_valueType_keyword = kw("db.type", "keyword");
+const keyword* db_valueType_ref = kw("db.type", "ref");
+
+const keyword* db_part_db = kw("db.part", "db");
+const keyword* db_part_tx = kw("db.part", "tx");
+const keyword* db_part_user = kw("db.part", "user");
+
+static int64_t temp_id_sequence = -1;
+
+// builtin attribute dbids
+enum {
+   dbid_ident = 0,
+   dbid_unique,
+   dbid_doc,
+   dbid_valuetype
+};
+
+enum {
+   DB_PART_DB = 0,
+   DB_PART_TX = 1,
+   DB_PART_USER
+};
+
+struct temp_id
+{
+   keyword* part;
+   int64_t s;
+};
+
+temp_id tempid(keyword* part)
+{
+   temp_id tid = {part, temp_id_sequence--};
+   return tid;
+}
+
 
 transaction* create_transaction()
 {
@@ -405,47 +489,79 @@ bool add_datom(transaction* txn, datom* d)
    return true;
 }
 
-
-bool add_fact(transaction* txn, int64_t e, int64_t a, int64_t v)
+datom* make_datom(memory_arena* arena, int64_t e, int64_t a, int64_t v, int64_t t = 0)
 {
-   datom* d = push_struct(txn->arena, datom);
+   datom* d = push_struct(arena, datom);
 
    d->f = int_value;
    d->e = e;
    d->a = a;
-   d->t = txn->txn_id;
+   d->t = t;
    d->v.i = v;
 
-   return add_datom(txn, d);
+   return d;
 }
 
-bool add_fact(transaction* txn, int64_t e, int64_t a, ref_t r)
+datom* make_datom(memory_arena* arena, int64_t e, int64_t a, ref_t r, int64_t t = 0)
 {
-   datom* d = push_struct(txn->arena, datom);
+   datom* d = push_struct(arena, datom);
 
    d->f = ref_value;
    d->e = e;
    d->a = a;
-   d->t = txn->txn_id;
+   d->t = t;
    d->v.i = r.r;
 
-   return add_datom(txn, d);
+   return d;
 }
 
-bool add_fact(transaction* txn, int64_t e, int64_t a, const char* v)
+datom* make_datom(memory_arena* arena, int64_t e, int64_t a, const char* v, int64_t t = 0)
 {
    int len = strlen(v)+1;
 
-   datom* d = (datom*)arena_allocate(txn->arena, sizeof(datom) + len - 4);
+   datom* d = (datom*)arena_allocate(arena, sizeof(datom) + len - 4);
 
    d->f = string_value;
    d->e = e;
    d->a = a;
-   d->t = txn->txn_id;
+   d->t = t;
    d->v.s.s = len;
    strcpy(d->v.s.c, v);
 
-   return add_datom(txn, d);
+   return d;
+}
+
+datom* make_datom(memory_arena* arena, int64_t e, int64_t a, const keyword* kw, int64_t t = 0)
+{
+   datom* d = (datom*)arena_allocate(arena, sizeof(datom));
+
+   d->f = keyword_value;
+   d->e = e;
+   d->a = a;
+   d->t = t;
+   d->v.kw = kw;
+
+   return d;
+}
+
+bool add_fact(transaction* txn, int64_t e, int64_t a, int64_t v)
+{
+   return add_datom(txn, make_datom(txn->arena, e, a, v));
+}
+
+bool add_fact(transaction* txn, int64_t e, int64_t a, ref_t r)
+{
+   return add_datom(txn, make_datom(txn->arena, e, a, r));
+}
+
+bool add_fact(transaction* txn, int64_t e, int64_t a, const char* v)
+{
+   return add_datom(txn, make_datom(txn->arena, e, a, v));
+}
+
+bool add_fact(transaction* txn, int64_t e, int64_t a, keyword* kw)
+{
+   return add_datom(txn, make_datom(txn->arena, e, a, kw));
 }
 
 transaction_result* transact(database* db, transaction* txn)
@@ -471,10 +587,119 @@ transaction_result* transact(database* db, transaction* txn)
    return 0;
 }
 
+void install_ident(database* db, const keyword* ident)
+{
+   int64_t id = db->partitions[DB_PART_DB].sequence++;
+
+   datom* d = make_datom(db->arena, id, dbid_ident, ident);
+   bptree_key_t k = datom_to_key(d);
+
+   bptree_insert(&db->eavt.t, k);
+   bptree_insert(&db->aevt.t, k);
+   bptree_insert(&db->avet.t, k);
+}
+
+ref_t lookup_ref(database* db, keyword* ident)
+{
+   bptree_iterator it;
+   datom d = {};
+
+   d.f = keyword_value;
+   d.e = -1;
+   d.a = dbid_ident;
+   d.v.kw = ident;
+
+   bptree_scan(&db->avet.t, datom_to_key(&d), &it);
+   if (bptree_iterator_is_end(&it)) {
+      return ref(-1);
+   }
+   datom* a = key_to_datom(bptree_key(&it));
+   return ref(a->e);
+}
+
+void install_attribute(database* db, const keyword* ident, const keyword* unique, const keyword* valueType, const char* doc)
+{
+   int id = db->attribute_count++;
+
+   db->installed_attributes[id].id = id;
+   db->installed_attributes[id].ident = ident;
+   db->installed_attributes[id].unique = unique;
+   db->installed_attributes[id].valueType = valueType;
+   db->installed_attributes[id].doc = doc;
+
+   datom* d = make_datom(db->arena, id, dbid_ident, ident);
+   bptree_key_t k = datom_to_key(d);
+
+   bptree_insert(&db->eavt.t, k);
+   bptree_insert(&db->aevt.t, k);
+   bptree_insert(&db->avet.t, k);
+
+   if (unique) {
+      datom* d = make_datom(db->arena, id, dbid_ident, ident);
+      bptree_key_t k = datom_to_key(d);
+
+      bptree_insert(&db->eavt.t, k);
+      bptree_insert(&db->aevt.t, k);
+      bptree_insert(&db->avet.t, k);
+   }
+}
+
+void init_database(database* db)
+{
+   init_index(&db->eavt, 7, compare_eavt);
+   init_index(&db->aevt, 7, compare_aevt);
+   init_index(&db->avet, 7, compare_avet);
+   init_index(&db->vaet, 7, compare_vaet);
+
+   db->partitions[0].id = DB_PART_DB;
+   db->partitions[0].name = db_part_db;
+   db->partitions[0].sequence = 0;
+
+   db->partitions[1].id = DB_PART_TX;
+   db->partitions[1].name = db_part_tx;
+   db->partitions[1].sequence = 1;
+
+   db->partitions[1].id = DB_PART_USER;
+   db->partitions[1].name = db_part_user;
+   db->partitions[1].sequence = 1;
+
+   install_ident(db, db_ident);
+   install_ident(db, db_id);
+   install_ident(db, db_valueType);
+   install_ident(db, db_doc);
+   install_ident(db, db_unique);
+   install_ident(db, db_unique_value);
+   install_ident(db, db_unique_identity);
+   install_ident(db, db_valueType_string);
+   install_ident(db, db_valueType_int);
+   install_ident(db, db_valueType_keyword);
+   install_ident(db, db_valueType_ref);
+   install_ident(db, db_part_db);
+   install_ident(db, db_part_tx);
+   install_ident(db, db_part_user);
+
+   install_attribute(db, db_ident, db_unique_identity, db_valueType_keyword, "The db/ident");
+   install_attribute(db, db_doc, 0, db_valueType_string, "The doc string");
+   install_attribute(db, db_valueType, 0, db_valueType_ref, "Ref to the type");
+
+}
+
+database* create_database()
+{
+   memory_arena* arena = create_arena(409600);
+
+   database* db = push_struct(arena, database);
+
+   db->arena = arena;
+
+   init_database(db);
+
+   return db;
+}
+
 void test_simple_transaction()
 {
-   database db = {};
-   init_database(&db);
+   database* db = create_database();
 
    transaction* txn = create_transaction();
 
@@ -487,12 +712,12 @@ void test_simple_transaction()
    add_fact(txn, 1, 3, 7);
    add_fact(txn, 1, 4, "zzzz");
 
-   transact(&db, txn);
+   transact(db, txn);
 
    printf("scan eavt\n");
    datom q = {0};
    bptree_iterator it;
-   bptree_scan(&db.eavt.t, datom_to_key(&q), &it);
+   bptree_scan(&db->eavt.t, datom_to_key(&q), &it);
 
    while (!bptree_iterator_is_end(&it)) {
       datom* d = key_to_datom(bptree_key(&it));
@@ -506,7 +731,7 @@ void test_simple_transaction()
    printf("scan aevt\n");
 
    //q.a = 1;
-   bptree_scan(&db.aevt.t, datom_to_key(&q), &it);
+   bptree_scan(&db->aevt.t, datom_to_key(&q), &it);
 
    while (!bptree_iterator_is_end(&it)) {
       datom* d = key_to_datom(bptree_key(&it));
@@ -528,10 +753,10 @@ void test_simple_transaction()
    add_fact(txn, 3, 3, 7);
    add_fact(txn, 3, 4, "yyyy");
 
-   transact(&db, txn);
+   transact(db, txn);
 
    printf("scan eavt 2\n");
-   bptree_scan(&db.eavt.t, datom_to_key(&q), &it);
+   bptree_scan(&db->eavt.t, datom_to_key(&q), &it);
 
    while (!bptree_iterator_is_end(&it)) {
       datom* d = key_to_datom(bptree_key(&it));
@@ -544,7 +769,7 @@ void test_simple_transaction()
 
    printf("scan aevt 2\n");
 
-   bptree_scan(&db.aevt.t, datom_to_key(&q), &it);
+   bptree_scan(&db->aevt.t, datom_to_key(&q), &it);
 
    while (!bptree_iterator_is_end(&it)) {
       datom* d = key_to_datom(bptree_key(&it));
@@ -590,11 +815,36 @@ void test_interning_keywords()
 
 }
 
+void test_init_database()
+{
+   database* db = create_database();
+
+   ref_t r = lookup_ref(db, kw("db", "ident"));
+
+   assert (r.r == dbid_ident);
+
+   bptree_iterator it;
+
+   bptree_begin(&db->eavt.t, &it);
+
+   while (!bptree_iterator_is_end(&it)) {
+      bptree_key_t k = bptree_key(&it);
+      print_datom(key_to_datom(k));
+      printf("\n");
+
+      bptree_iterator_next(&it);
+   }
+
+}
+
 int main(int argc, char** argv)
 {
    test_interning_keywords();
    test_memory_arena();
-   test_simple_transaction();
+   //test_simple_transaction();
+
+   test_init_database();
+
 
    return 0;
 }
